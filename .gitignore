@@ -1,1 +1,24 @@
+# C compiled output
+*.o
+*.out
+a.out
+
+# Rust build output
+client/target/
+
+# Python cache
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# Log files
+*.log
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# VS Code
+.vscode/
+
 .local
