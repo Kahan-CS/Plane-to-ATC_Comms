@@ -15,16 +15,15 @@
 ///   - DO-178C DAL-D: deterministic startup, traceable operations
 ///
 /// REQ-CLT-010, REQ-CLT-030, REQ-SYS-080, REQ-PKT-061
-
 mod packet;
+mod logger;
 mod network;
-// logger module added in next commit
+use logger::Logger;
 
-use packet::{
-    HandshakePayload, Packet, PacketHeader,
-    PKT_ACK, PKT_DISCONNECT, PKT_ERROR, PKT_HANDSHAKE,
-};
 use network::Connection;
+use packet::{
+    HandshakePayload, PKT_ACK, PKT_DISCONNECT, PKT_ERROR, PKT_HANDSHAKE, Packet, PacketHeader,
+};
 
 use std::io::{self, BufRead, Write};
 use std::process;
@@ -37,18 +36,30 @@ fn main() {
             "Usage: {} <SERVER_IP> <PORT> <CALLSIGN> <TYPE> <MODEL> <ORIGIN> <DEST>",
             args[0]
         );
-        eprintln!("Example: {} 127.0.0.1 9000 AC8821 B737 737-800 CYYZ CYVR", args[0]);
+        eprintln!(
+            "Example: {} 127.0.0.1 9000 AC8821 B737 737-800 CYYZ CYVR",
+            args[0]
+        );
         process::exit(1);
     }
 
     let server_addr = format!("{}:{}", args[1], args[2]);
-    let callsign  = args[3].clone();
-    let ac_type   = args[4].clone();
-    let ac_model  = args[5].clone();
-    let origin    = args[6].clone();
-    let dest      = args[7].clone();
+    let callsign = args[3].clone();
+    let ac_type = args[4].clone();
+    let ac_model = args[5].clone();
+    let origin = args[6].clone();
+    let dest = args[7].clone();
 
-    // Connect (REQ-CLT-010, REQ-COM-020) ────────────────
+    let logger = Logger::new("atc_client").unwrap_or_else(|e| {
+        eprintln!("[FATAL] Cannot create log file: {}", e);
+        process::exit(2);
+    });
+    logger.log_connection(&format!(
+        "Session started — {} ({}/{}) {}→{}",
+        callsign, ac_type, ac_model, origin, dest
+    ));
+
+    // Connect (REQ-CLT-010, REQ-COM-020)
     println!("=== ATC Communications Client ===");
     println!("Aircraft : {} ({}/{})", callsign, ac_type, ac_model);
     println!("Route    : {} → {}", origin, dest);
@@ -63,26 +74,28 @@ fn main() {
 
     println!("[OK] Connected.");
 
-    // Handshake (REQ-SYS-080, REQ-PKT-061, REQ-CLT-030) 
+    logger.log_connection(&format!("Connected to {}", server_addr));
+
+    // Handshake (REQ-SYS-080, REQ-PKT-061, REQ-CLT-030)
     let mut seq: u32 = 1;
 
     let hs_payload = HandshakePayload {
-        callsign:       HandshakePayload::str_to_fixed(&callsign),
-        aircraft_type:  HandshakePayload::str_to_fixed(&ac_type),
+        callsign: HandshakePayload::str_to_fixed(&callsign),
+        aircraft_type: HandshakePayload::str_to_fixed(&ac_type),
         aircraft_model: HandshakePayload::str_to_fixed(&ac_model),
-        origin:         HandshakePayload::str_to_fixed(&origin),
-        destination:    HandshakePayload::str_to_fixed(&dest),
+        origin: HandshakePayload::str_to_fixed(&origin),
+        destination: HandshakePayload::str_to_fixed(&dest),
     };
     let payload_bytes = hs_payload.to_bytes();
 
     let handshake = Packet {
         header: PacketHeader {
-            packet_type:    PKT_HANDSHAKE,
-            seq_num:        seq,
-            timestamp:      current_timestamp(),
+            packet_type: PKT_HANDSHAKE,
+            seq_num: seq,
+            timestamp: current_timestamp(),
             payload_length: payload_bytes.len() as u32,
-            origin_atc_id:  0,
-            aircraft_id:    HandshakePayload::str_to_fixed(&callsign),
+            origin_atc_id: 0,
+            aircraft_id: HandshakePayload::str_to_fixed(&callsign),
             emergency_flag: 0,
         },
         payload: payload_bytes,
@@ -95,19 +108,29 @@ fn main() {
         eprintln!("[FATAL] Handshake send failed: {}", e);
         process::exit(3);
     });
+    logger.log_tx(
+        "HANDSHAKE",
+        1,
+        payload_bytes.len() as u32,
+        &format!("{} {}/{} {}→{}", callsign, ac_type, ac_model, origin, dest),
+    );
     seq += 1;
 
     // Wait for ACK (REQ-SYS-080)
     match conn.recv_packet() {
         Ok(pkt) if pkt.header.packet_type == PKT_ACK => {
             println!("[OK] Connection verified by ATC.");
+            logger.log_rx("ACK", pkt.header.seq_num, 0, "handshake acknowledged");
         }
         Ok(pkt) if pkt.header.packet_type == PKT_ERROR => {
             eprintln!("[FATAL] ATC rejected handshake.");
             process::exit(4);
         }
         Ok(pkt) => {
-            eprintln!("[FATAL] Unexpected response: 0x{:02X}", pkt.header.packet_type);
+            eprintln!(
+                "[FATAL] Unexpected response: 0x{:02X}",
+                pkt.header.packet_type
+            );
             process::exit(5);
         }
         Err(e) => {
@@ -116,8 +139,10 @@ fn main() {
         }
     }
 
-    // Interactive menu (REQ-SYS-040) ──
+    // Interactive menu (REQ-SYS-040)
     run_menu(&mut conn, &mut seq, &callsign);
+
+    logger.write_summary();
 }
 
 /// Main interactive menu loop.
@@ -179,12 +204,12 @@ fn run_menu(conn: &mut Connection, seq: &mut u32, callsign: &str) {
 fn send_disconnect(conn: &mut Connection, seq: &mut u32, callsign: &str) {
     let pkt = Packet {
         header: PacketHeader {
-            packet_type:    PKT_DISCONNECT,
-            seq_num:        *seq,
-            timestamp:      current_timestamp(),
+            packet_type: PKT_DISCONNECT,
+            seq_num: *seq,
+            timestamp: current_timestamp(),
             payload_length: 0,
-            origin_atc_id:  0,
-            aircraft_id:    HandshakePayload::str_to_fixed(callsign),
+            origin_atc_id: 0,
+            aircraft_id: HandshakePayload::str_to_fixed(callsign),
             emergency_flag: 0,
         },
         payload: vec![],
