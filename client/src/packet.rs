@@ -220,12 +220,18 @@ mod tests {
         };
         let bytes = original.to_bytes();
         let decoded = PacketHeader::from_bytes(&bytes);
-        assert_eq!(decoded.packet_type,    original.packet_type);
-        assert_eq!(decoded.seq_num,        original.seq_num);
-        assert_eq!(decoded.timestamp,      original.timestamp);
-        assert_eq!(decoded.payload_length, original.payload_length);
-        assert_eq!(decoded.origin_atc_id,  original.origin_atc_id);
-        assert_eq!(decoded.aircraft_id,    original.aircraft_id);
+        // u8 and [u8;32] fields are alignment-1 — assert_eq directly is fine.
+        // u32/i64 fields are packed (may be misaligned) — copy to locals first (E0793).
+        assert_eq!(decoded.packet_type,  original.packet_type);
+        let dec_seq = decoded.seq_num;        let orig_seq = original.seq_num;
+        assert_eq!(dec_seq, orig_seq);
+        let dec_ts  = decoded.timestamp;      let orig_ts  = original.timestamp;
+        assert_eq!(dec_ts,  orig_ts);
+        let dec_pl  = decoded.payload_length; let orig_pl  = original.payload_length;
+        assert_eq!(dec_pl,  orig_pl);
+        let dec_atc = decoded.origin_atc_id;  let orig_atc = original.origin_atc_id;
+        assert_eq!(dec_atc, orig_atc);
+        assert_eq!(decoded.aircraft_id,  original.aircraft_id);
         assert_eq!(decoded.emergency_flag, original.emergency_flag);
     }
 
@@ -243,5 +249,115 @@ mod tests {
         header.emergency_flag = 0;
         let bytes2 = header.to_bytes();
         assert_eq!(bytes2[53], 0);
+    }
+
+    /// REQ-PKT-010: Every packet type constant must match the agreed wire value.
+    #[test]
+    fn test_all_packet_type_constants_defined() {
+        assert_eq!(PKT_HANDSHAKE,          0x01);
+        assert_eq!(PKT_ACK,                0x02);
+        assert_eq!(PKT_ERROR,              0x03);
+        assert_eq!(PKT_TAKEOFF,            0x04);
+        assert_eq!(PKT_TRANSIT,            0x05);
+        assert_eq!(PKT_LANDING,            0x06);
+        assert_eq!(PKT_MAYDAY,             0x07);
+        assert_eq!(PKT_LARGE_DATA_REQUEST, 0x08);
+        assert_eq!(PKT_LARGE_DATA,         0x09);
+        assert_eq!(PKT_HANDOFF_NOTIFY,     0x0A);
+        assert_eq!(PKT_DISCONNECT,         0x0B);
+    }
+
+    /// REQ-PKT-034: emergency_flag must be readable from the header
+    /// without deserializing the payload.
+    #[test]
+    fn test_emergency_flag_readable_from_header() {
+        let header = PacketHeader {
+            packet_type:    PKT_MAYDAY,
+            seq_num:        1,
+            timestamp:      0,
+            payload_length: 0,
+            origin_atc_id:  0,
+            aircraft_id:    [0u8; 32],
+            emergency_flag: 1,
+        };
+        let flag = header.emergency_flag;
+        assert_eq!(flag, 1, "emergency_flag must be 1 for MAYDAY");
+    }
+
+    /// REQ-PKT-020: A buffered handoff packet must have a non-zero origin_atc_id.
+    #[test]
+    fn test_buffered_packet_has_nonzero_atc_id() {
+        let header = PacketHeader {
+            packet_type:    PKT_HANDSHAKE,
+            seq_num:        5,
+            timestamp:      0,
+            payload_length: 0,
+            origin_atc_id:  1001,
+            aircraft_id:    [0u8; 32],
+            emergency_flag: 0,
+        };
+        let atc_id = header.origin_atc_id;
+        assert_ne!(atc_id, 0,    "buffered packet must have non-zero origin_atc_id");
+        assert_eq!(atc_id, 1001, "origin_atc_id must equal the value set");
+    }
+
+    /// REQ-PKT-020: A live (non-buffered) packet must have origin_atc_id == 0.
+    #[test]
+    fn test_live_packet_has_zero_atc_id() {
+        let header = PacketHeader {
+            packet_type:    PKT_HANDSHAKE,
+            seq_num:        1,
+            timestamp:      0,
+            payload_length: 0,
+            origin_atc_id:  0,
+            aircraft_id:    [0u8; 32],
+            emergency_flag: 0,
+        };
+        let atc_id = header.origin_atc_id;
+        assert_eq!(atc_id, 0, "live packet must have origin_atc_id == 0");
+    }
+
+    /// REQ-PKT-030, REQ-SYS-020: Serialized header must be exactly 54 bytes.
+    #[test]
+    fn test_header_serializes_to_54_bytes() {
+        let header = PacketHeader {
+            packet_type:    PKT_HANDSHAKE,
+            seq_num:        1,
+            timestamp:      1_700_000_000,
+            payload_length: 52,
+            origin_atc_id:  0,
+            aircraft_id:    [0u8; 32],
+            emergency_flag: 0,
+        };
+        let bytes = header.to_bytes();
+        assert_eq!(bytes.len(), 54, "serialized header must be exactly 54 bytes");
+    }
+
+    /// REQ-PKT-061: HandshakePayload packed size must match C struct (52 bytes).
+    #[test]
+    fn test_handshake_payload_fits_in_52_bytes() {
+        let size = std::mem::size_of::<HandshakePayload>();
+        assert_eq!(size, 52);
+    }
+
+    /// REQ-CLT-040: TakeoffPayload packed size must match C struct (41 bytes).
+    #[test]
+    fn test_takeoff_payload_size() {
+        let size = std::mem::size_of::<TakeoffPayload>();
+        assert_eq!(size, 41);
+    }
+
+    /// REQ-CLT-040: TransitPayload packed size must match C struct (14 bytes).
+    #[test]
+    fn test_transit_payload_size() {
+        let size = std::mem::size_of::<TransitPayload>();
+        assert_eq!(size, 14);
+    }
+
+    /// REQ-CLT-040: LandingPayload packed size must match C struct (27 bytes).
+    #[test]
+    fn test_landing_payload_size() {
+        let size = std::mem::size_of::<LandingPayload>();
+        assert_eq!(size, 27);
     }
 }
