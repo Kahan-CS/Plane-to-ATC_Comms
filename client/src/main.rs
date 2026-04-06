@@ -19,9 +19,11 @@
 mod logger;
 mod network;
 mod packet;
+mod phases;
 
 use logger::Logger;
 use network::Connection;
+use phases::{build_landing_packet, build_takeoff_packet, build_transit_packet};
 use packet::{
     HandshakePayload, Packet, PacketHeader,
     PKT_ACK, PKT_DISCONNECT, PKT_ERROR, PKT_HANDSHAKE,
@@ -190,16 +192,49 @@ fn run_menu(conn: &mut Connection, seq: &mut u32, callsign: &str, logger: &Logge
 
         match input.trim() {
             "1" => {
-                println!("[Takeoff]:");
-                // TODO : collect takeoff telemetry and send PKT_TAKEOFF
+                let pkt = build_takeoff_packet(*seq, callsign, current_timestamp());
+                let plen = pkt.header.payload_length;
+                match conn.send_packet(&pkt) {
+                    Ok(_) => {
+                        logger.log_tx("TAKEOFF", *seq, plen, "takeoff telemetry sent");
+                        println!("[Takeoff] Telemetry sent.");
+                    }
+                    Err(e) => {
+                        logger.log_error(&format!("TAKEOFF send failed: {}", e));
+                        println!("[Takeoff] Send failed: {}", e);
+                    }
+                }
+                *seq += 1;
             }
             "2" => {
-                println!("[Transit]:");
-                // TODO : collect transit telemetry and send PKT_TRANSIT
+                let pkt = build_transit_packet(*seq, callsign, current_timestamp());
+                let plen = pkt.header.payload_length;
+                match conn.send_packet(&pkt) {
+                    Ok(_) => {
+                        logger.log_tx("TRANSIT", *seq, plen, "transit telemetry sent");
+                        println!("[Transit] Telemetry sent.");
+                    }
+                    Err(e) => {
+                        logger.log_error(&format!("TRANSIT send failed: {}", e));
+                        println!("[Transit] Send failed: {}", e);
+                    }
+                }
+                *seq += 1;
             }
             "3" => {
-                println!("[Landing]:");
-                // TODO : collect landing telemetry and send PKT_LANDING
+                let pkt = build_landing_packet(*seq, callsign, current_timestamp());
+                let plen = pkt.header.payload_length;
+                match conn.send_packet(&pkt) {
+                    Ok(_) => {
+                        logger.log_tx("LANDING", *seq, plen, "landing telemetry sent");
+                        println!("[Landing] Telemetry sent.");
+                    }
+                    Err(e) => {
+                        logger.log_error(&format!("LANDING send failed: {}", e));
+                        println!("[Landing] Send failed: {}", e);
+                    }
+                }
+                *seq += 1;
             }
             "4" => {
                 println!("[MAYDAY]:");
