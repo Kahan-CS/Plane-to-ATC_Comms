@@ -21,9 +21,12 @@
  *   - CARs SOR/96-433 Part V (Airworthiness)
  *   - DO-178C DAL-D guidance (deterministic state machine, traceable logging)
  *
- * REQ-SVR-010, REQ-SVR-020, REQ-SVR-030, REQ-SVR-040, REQ-SVR-050,
- * REQ-SVR-060, REQ-SVR-070, REQ-STM-010, REQ-STM-020, REQ-STM-030,
- * REQ-STM-040, REQ-LOG-010, REQ-LOG-020, REQ-LOG-060
+ * State flow:
+ *   IDLE -> HANDSHAKE -> TAKEOFF -> TRANSIT -> LANDING -> DISCONNECTED -> IDLE
+ *   - HANDSHAKE->TAKEOFF: automatic after handshake verified
+ *   - TAKEOFF->TRANSIT:   when client sends PKT_TRANSIT
+ *   - TRANSIT->LANDING:   when client sends PKT_LANDING
+ *   - MAYDAY:             from any active state (TAKEOFF/TRANSIT/LANDING)
  */
 
  /*Command to run the server:
@@ -34,6 +37,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <conio.h>
 
 #include "../../shared/packet.h"
 #include "include/server_config.h"
@@ -45,9 +49,8 @@
  *  Session registry  (REQ-SVR-060)
  * ================================================================ */
 
-static int     g_session_count = 0;
+static int g_session_count = 0;
 
-/* Print a one-line session status panel to stdout (REQ-SVR-060). */
 static void display_session_status(const char *aircraft_id, ATCState phase) {
     printf("--- [SESSION STATUS] Sessions: %d | Aircraft: %-12s | Phase: %s ---\n",
            g_session_count,
@@ -73,7 +76,27 @@ static void handle_client(SOCKET client_fd) {
     printf("[ATC] State: %s -> %s\n", state_to_str(prev), state_to_str(state));
     display_session_status("(connecting...)", state);
 
+    printf("\n[ATC] Press 'D' at any time to disconnect the aircraft.\n\n");
+
     while (1) {
+        /* Check if ATC controller pressed a key. */
+        if (_kbhit()) {
+            int ch = _getch();
+            if (ch == 'd' || ch == 'D') {
+                printf("[ATC] Disconnect initiated by ATC controller.\n");
+                send_ack(client_fd, 0, aircraft_id);
+                log_info("ATC-initiated disconnect");
+                goto session_end;
+            }
+        }
+
+        /* Wait up to 1 second for client data (non-blocking). */
+        fd_set rfds;
+        struct timeval tv = { 1, 0 };
+        FD_ZERO(&rfds);
+        FD_SET(client_fd, &rfds);
+        if (select(0, &rfds, NULL, NULL, &tv) <= 0) continue;
+
         PacketHeader hdr;
         uint8_t     *payload = NULL;
 
@@ -91,8 +114,7 @@ static void handle_client(SOCKET client_fd) {
 
         const char *type_str = packet_type_str(hdr.packet_type);
 
-        /* REQ-SVR-030 / REQ-LOG-050: Emergency flag — check before switch.
-         * REQ-STM-040: Transition to MAYDAY sub-state from any active flight state. */
+        /* REQ-SVR-030 / REQ-STM-040: Emergency flag check before dispatch. */
         if (hdr.emergency_flag == 1) {
             printf("\n!!! [MAYDAY] EMERGENCY from %s !!!\n\n", hdr.aircraft_id);
             char s[128]; snprintf(s, sizeof(s), "MAYDAY from %s", hdr.aircraft_id);
@@ -128,7 +150,7 @@ static void handle_client(SOCKET client_fd) {
         /* ---- Dispatch ---- */
         switch (hdr.packet_type) {
 
-        /* ---- HANDSHAKE (REQ-SVR-010, REQ-PKT-061) ---- */
+        /* ---- HANDSHAKE ---- */
         case PKT_HANDSHAKE: {
             if (state != STATE_HANDSHAKE) {
                 send_error_pkt(client_fd, "HANDSHAKE not expected in current state", aircraft_id);
@@ -153,6 +175,7 @@ static void handle_client(SOCKET client_fd) {
                 break;
             }
 
+            /* HANDSHAKE -> TAKEOFF (automatic after verification) */
             prev = state; state = STATE_TAKEOFF;
             log_state_transition(prev, state, "Handshake verified");
             printf("[ATC] Handshake VERIFIED. State: %s -> %s\n",
@@ -162,7 +185,7 @@ static void handle_client(SOCKET client_fd) {
             break;
         }
 
-        /* ---- TAKEOFF (REQ-SVR-020, REQ-SVR-070) ---- */
+        /* ---- TAKEOFF (stays in TAKEOFF until client sends TRANSIT) ---- */
         case PKT_TAKEOFF: {
             if (state != STATE_TAKEOFF) {
                 send_error_pkt(client_fd, "TAKEOFF not valid in current state", aircraft_id);
@@ -192,13 +215,9 @@ static void handle_client(SOCKET client_fd) {
                 printf("[ATC]   (payload too small for TakeoffPayload)\n");
             }
 
-            prev = state; state = STATE_TRANSIT;
-            log_state_transition(prev, state, "Takeoff packet received");
-            printf("[ATC] State: %s -> %s\n", state_to_str(prev), state_to_str(state));
-            display_session_status(aircraft_id, state);
             send_ack(client_fd, hdr.seq_num, aircraft_id);
 
-            /* REQ-SVR-070: Send departure clearance with assigned heading, altitude, squawk. */
+            /* REQ-SVR-070: Departure clearance. */
             {
                 char clearance[160];
                 snprintf(clearance, sizeof(clearance),
@@ -211,11 +230,18 @@ static void handle_client(SOCKET client_fd) {
             break;
         }
 
-        /* ---- TRANSIT (REQ-SVR-020) ---- */
+        /* ---- TRANSIT (transitions TAKEOFF->TRANSIT on first packet) ---- */
         case PKT_TRANSIT: {
-            if (state != STATE_TRANSIT) {
+            if (state != STATE_TAKEOFF && state != STATE_TRANSIT) {
                 send_error_pkt(client_fd, "TRANSIT not valid in current state", aircraft_id);
                 break;
+            }
+
+            if (state == STATE_TAKEOFF) {
+                prev = state; state = STATE_TRANSIT;
+                log_state_transition(prev, state, "Transit packet received");
+                printf("[ATC] State: %s -> %s\n", state_to_str(prev), state_to_str(state));
+                display_session_status(aircraft_id, state);
             }
 
             printf("[ATC] TRANSIT telemetry from: %s\n", aircraft_id);
@@ -229,19 +255,22 @@ static void handle_client(SOCKET client_fd) {
                 printf("[ATC]   (payload too small for TransitPayload)\n");
             }
 
-            prev = state; state = STATE_LANDING;
-            log_state_transition(prev, state, "Transit packet received");
-            printf("[ATC] State: %s -> %s\n", state_to_str(prev), state_to_str(state));
-            display_session_status(aircraft_id, state);
             send_ack(client_fd, hdr.seq_num, aircraft_id);
             break;
         }
 
-        /* ---- LANDING (REQ-SVR-020, REQ-SVR-070) ---- */
+        /* ---- LANDING (transitions TRANSIT->LANDING on first packet) ---- */
         case PKT_LANDING: {
-            if (state != STATE_LANDING) {
+            if (state != STATE_TRANSIT && state != STATE_LANDING) {
                 send_error_pkt(client_fd, "LANDING not valid in current state", aircraft_id);
                 break;
+            }
+
+            if (state == STATE_TRANSIT) {
+                prev = state; state = STATE_LANDING;
+                log_state_transition(prev, state, "Landing packet received");
+                printf("[ATC] State: %s -> %s\n", state_to_str(prev), state_to_str(state));
+                display_session_status(aircraft_id, state);
             }
 
             char    runway[5]       = "N/A";
@@ -270,7 +299,7 @@ static void handle_client(SOCKET client_fd) {
 
             send_ack(client_fd, hdr.seq_num, aircraft_id);
 
-            /* REQ-SVR-070: Send landing instructions — runway assignment and go-around command. */
+            /* REQ-SVR-070: Landing clearance. */
             {
                 char instr[160];
                 snprintf(instr, sizeof(instr),
@@ -283,10 +312,8 @@ static void handle_client(SOCKET client_fd) {
             break;
         }
 
-        /* ---- MAYDAY explicit packet (REQ-SVR-030, REQ-STM-040) ---- */
+        /* ---- MAYDAY explicit packet ---- */
         case PKT_MAYDAY: {
-            /* NOTE: packets with emergency_flag==1 are caught before the switch.
-             * This case handles a PKT_MAYDAY type with emergency_flag==0. */
             if (state != STATE_TAKEOFF && state != STATE_TRANSIT &&
                 state != STATE_LANDING && state != STATE_MAYDAY) {
                 send_error_pkt(client_fd, "MAYDAY packet not valid in current state", aircraft_id);
@@ -315,20 +342,18 @@ static void handle_client(SOCKET client_fd) {
 
         /* ---- HANDOFF NOTIFY (REQ-SVR-040) ---- */
         case PKT_HANDOFF_NOTIFY: {
-            printf("[ATC] Handoff notification from ATC #%u — aircraft: %s\n",
+            printf("[ATC] Handoff notification from ATC #%u - aircraft: %s\n",
                    hdr.origin_atc_id, aircraft_id);
             log_info("Handoff notification acknowledged");
             send_ack(client_fd, hdr.seq_num, aircraft_id);
             break;
         }
 
-        /* ---- DISCONNECT — graceful teardown ---- */
+        /* ---- DISCONNECT ---- */
         case PKT_DISCONNECT: {
             printf("[ATC] %s requesting disconnect\n", aircraft_id);
             send_ack(client_fd, hdr.seq_num, aircraft_id);
 
-            /* Advance through any skipped intermediate states to DISCONNECTED.
-             * Also handles MAYDAY -> DISCONNECTED via is_valid_transition(). */
             const ATCState path[] = { STATE_TRANSIT, STATE_LANDING, STATE_DISCONNECTED };
             for (int i = 0; i < 3; i++) {
                 if (is_valid_transition(state, path[i])) {
@@ -336,7 +361,6 @@ static void handle_client(SOCKET client_fd) {
                     log_state_transition(prev, state, "Disconnect requested");
                 }
             }
-            /* MAYDAY -> DISCONNECTED (not covered by path[] above). */
             if (state == STATE_MAYDAY) {
                 prev = state; state = STATE_DISCONNECTED;
                 log_state_transition(prev, state, "Disconnect from MAYDAY state");
@@ -344,7 +368,7 @@ static void handle_client(SOCKET client_fd) {
             free(payload); goto session_end;
         }
 
-        /* REQ-STM-030: Reject all unhandled / out-of-state packets. */
+        /* REQ-STM-030: Reject unhandled / out-of-state packets. */
         default: {
             char err[128];
             snprintf(err, sizeof(err), "Packet type %s (0x%02X) not handled in state %s",
@@ -368,12 +392,12 @@ session_end:
     display_session_status(NULL, STATE_IDLE);
     printf("[ATC] Session closed for %s. State returned to IDLE.\n",
            aircraft_id[0] ? aircraft_id : "(unknown)");
-    log_session_summary();   /* REQ-LOG-060 */
+    log_session_summary();
 }
 
 
 /* ================================================================
- *  Entry Point  (REQ-SVR-010)
+ *  Entry Point
  * ================================================================ */
 
 int main(int argc, char *argv[]) {
@@ -425,7 +449,6 @@ int main(int argc, char *argv[]) {
     printf("[ATC] Listening on port %d - waiting for aircraft...\n\n", port);
     log_info("Listening for connections");
 
-    /* REQ-SVR-010: Accept loop — one verified client at a time. */
     while (1) {
         struct sockaddr_in client_addr;
         int addr_len = sizeof(client_addr);
@@ -448,7 +471,6 @@ int main(int argc, char *argv[]) {
         printf("[ATC] Waiting for next aircraft...\n\n");
     }
 
-    /* Clean shutdown path. */
     closesocket(server_fd);
     logger_close();
     WSACleanup();

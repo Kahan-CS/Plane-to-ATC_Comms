@@ -55,7 +55,7 @@ static inline int64_t now_ms(void) {
     return (int64_t)(t / 10000);
 }
 
-/* ---- TCP I/O ----------------------------------------- */
+/* ---- TCP I/O --------------------------------------------------- */
 
 static inline int send_all(SOCKET sockfd, const void *buf, size_t len) {
     const char *ptr = (const char *)buf;
@@ -79,19 +79,53 @@ static inline int recv_all(SOCKET sockfd, void *buf, size_t len) {
     return 0;
 }
 
+/* ---- Byte-order conversion (network BE <-> host LE) ------------ */
+
+static inline uint64_t swap64(uint64_t v) {
+    return ((v & 0x00000000000000FFULL) << 56) |
+           ((v & 0x000000000000FF00ULL) << 40) |
+           ((v & 0x0000000000FF0000ULL) << 24) |
+           ((v & 0x00000000FF000000ULL) <<  8) |
+           ((v & 0x000000FF00000000ULL) >>  8) |
+           ((v & 0x0000FF0000000000ULL) >> 24) |
+           ((v & 0x00FF000000000000ULL) >> 40) |
+           ((v & 0xFF00000000000000ULL) >> 56);
+}
+
+/* Convert received header from network (big-endian) to host order. */
+static inline void header_ntoh(PacketHeader *h) {
+    h->seq_num        = ntohl(h->seq_num);
+    h->timestamp      = (int64_t)swap64((uint64_t)h->timestamp);
+    h->payload_length = ntohl(h->payload_length);
+    h->origin_atc_id  = ntohl(h->origin_atc_id);
+}
+
+/* Convert header from host to network (big-endian) before sending. */
+static inline void header_hton(PacketHeader *h) {
+    h->seq_num        = htonl(h->seq_num);
+    h->timestamp      = (int64_t)swap64((uint64_t)h->timestamp);
+    h->payload_length = htonl(h->payload_length);
+    h->origin_atc_id  = htonl(h->origin_atc_id);
+}
+
 /* ---- Packet-level I/O ------------------------------------------ */
 
+/* Send header in network byte order + payload in raw bytes. */
 static inline int send_packet(SOCKET sockfd, const PacketHeader *hdr, const void *payload) {
-    if (send_all(sockfd, hdr, sizeof(PacketHeader)) != 0) return -1;
-    if (hdr->payload_length > 0 && payload)
-        if (send_all(sockfd, payload, hdr->payload_length) != 0) return -1;
+    uint32_t host_payload_len = hdr->payload_length;
+    PacketHeader wire = *hdr;
+    header_hton(&wire);
+    if (send_all(sockfd, &wire, sizeof(PacketHeader)) != 0) return -1;
+    if (host_payload_len > 0 && payload)
+        if (send_all(sockfd, payload, host_payload_len) != 0) return -1;
     return 0;
 }
 
-/* Header read first (REQ-PKT-034). Caller must free(*out_payload). */
+/* Receive header (converted to host order) + payload. Caller must free(*out_payload). */
 static inline int recv_packet(SOCKET sockfd, PacketHeader *hdr, uint8_t **out_payload) {
     *out_payload = NULL;
     if (recv_all(sockfd, hdr, sizeof(PacketHeader)) != 0) return -1;
+    header_ntoh(hdr);
     if (hdr->payload_length > MAX_PAYLOAD_BYTES)           return -2;
     if (hdr->payload_length > 0) {
         *out_payload = (uint8_t *)malloc(hdr->payload_length);
@@ -155,8 +189,7 @@ static inline int send_error_pkt(SOCKET sockfd, const char *msg, const char *air
     return rc;
 }
 
-/* REQ-SVR-070: Send phase-appropriate ATC instruction text to the client.
- * Encoded as a PKT_ACK payload so the client can display it without a new packet type. */
+/* REQ-SVR-070: Send phase-appropriate ATC instruction text to the client. */
 static inline int send_atc_clearance(SOCKET sockfd, const char *instruction,
                                       const char *aircraft_id) {
     uint32_t len = (uint32_t)strlen(instruction);
@@ -173,10 +206,9 @@ static inline int send_atc_clearance(SOCKET sockfd, const char *instruction,
     return rc;
 }
 
-/* REQ-SVR-050: Transmit a large weather/telemetry data object (>= 1 MB) to the client
- * upon receiving PKT_LARGE_DATA_REQUEST. Response uses PKT_LARGE_DATA. */
+/* REQ-SVR-050: Transmit large weather/telemetry data (>= 1 MB). */
 static inline int send_large_data(SOCKET sockfd, const char *aircraft_id) {
-    const uint32_t DATA_SIZE = 1024u * 1024u + 512u;  /* 1 MB + 512 bytes */
+    const uint32_t DATA_SIZE = 1024u * 1024u + 512u;
 
     uint8_t *data = (uint8_t *)malloc(DATA_SIZE);
     if (!data) {
@@ -184,7 +216,6 @@ static inline int send_large_data(SOCKET sockfd, const char *aircraft_id) {
         return -1;
     }
 
-    /* Fill buffer with a repeated ATIS / weather report string. */
     static const char WEATHER_TEMPLATE[] =
         "ATIS CYYZ INFO ALPHA: WIND 270 AT 15KT, VIS 10SM, FEW CLOUDS 3000FT, "
         "SCT 6000FT, BKN 25000FT, TEMP 12 DEW POINT 08, ALTIMETER 2992, "
@@ -197,7 +228,7 @@ static inline int send_large_data(SOCKET sockfd, const char *aircraft_id) {
         offset += (uint32_t)tlen;
     }
     if (offset < DATA_SIZE)
-        memset(data + offset, 0x20, DATA_SIZE - offset);  /* pad remainder with spaces */
+        memset(data + offset, 0x20, DATA_SIZE - offset);
 
     PacketHeader hdr;
     build_header(&hdr, PKT_LARGE_DATA, DATA_SIZE, aircraft_id);
