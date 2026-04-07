@@ -24,7 +24,8 @@ mod receiver;
 use logger::Logger;
 use network::Connection;
 use packet::{
-    HandshakePayload, PKT_ACK, PKT_DISCONNECT, PKT_ERROR, PKT_HANDSHAKE, Packet, PacketHeader,
+    HandshakePayload, PKT_ACK, PKT_DISCONNECT, PKT_ERROR, PKT_HANDSHAKE,
+    PKT_LARGE_DATA_REQUEST, PKT_MAYDAY, Packet, PacketHeader,
 };
 use phases::{build_landing_packet, build_takeoff_packet, build_transit_packet};
 use receiver::spawn_receiver;
@@ -291,8 +292,32 @@ fn run_menu(
                 *seq += 1;
             }
             "4" => {
-                println!("[MAYDAY]:");
-                // TODO : set emergency_flag in header and send PKT_MAYDAY
+                // REQ-CLT-050, REQ-PKT-062: MAYDAY sets emergency_flag=1
+                // REQ-LOG-050: logged with [MAYDAY] prefix
+                println!("[MAYDAY] Transmitting emergency signal...");
+                let pkt = Packet {
+                    header: PacketHeader {
+                        packet_type: PKT_MAYDAY,
+                        seq_num: *seq,
+                        timestamp: current_timestamp(),
+                        payload_length: 0,
+                        origin_atc_id: 0,
+                        aircraft_id: HandshakePayload::str_to_fixed(callsign),
+                        emergency_flag: 1,
+                    },
+                    payload: vec![],
+                };
+                match conn.send_packet(&pkt) {
+                    Ok(_) => {
+                        logger.log_mayday(*seq);
+                        println!("[MAYDAY] Emergency signal sent.");
+                    }
+                    Err(e) => {
+                        logger.log_error(&format!("MAYDAY send failed: {}", e));
+                        println!("[MAYDAY] Send failed: {}", e);
+                    }
+                }
+                *seq += 1;
             }
             "5" => {
                 send_disconnect(conn, seq, callsign, logger.as_ref());
@@ -300,8 +325,36 @@ fn run_menu(
                 break;
             }
             "6" => {
-                println!("[Weather]:");
-                // TODO : send PKT_LARGE_DATA_REQUEST and receive ≥1 MB response
+                // REQ-SYS-070: request >= 1 MB weather/telemetry data from server
+                println!("[Weather] Requesting large weather data from ATC...");
+                let pkt = Packet {
+                    header: PacketHeader {
+                        packet_type: PKT_LARGE_DATA_REQUEST,
+                        seq_num: *seq,
+                        timestamp: current_timestamp(),
+                        payload_length: 0,
+                        origin_atc_id: 0,
+                        aircraft_id: HandshakePayload::str_to_fixed(callsign),
+                        emergency_flag: 0,
+                    },
+                    payload: vec![],
+                };
+                match conn.send_packet(&pkt) {
+                    Ok(_) => {
+                        logger.log_tx(
+                            "LARGE_DATA_REQUEST",
+                            *seq,
+                            0,
+                            "requested weather/telemetry object >=1MB",
+                        );
+                        println!("[Weather] Request sent - awaiting data (see receiver)...");
+                    }
+                    Err(e) => {
+                        logger.log_error(&format!("LARGE_DATA_REQUEST send failed: {}", e));
+                        println!("[Weather] Request failed: {}", e);
+                    }
+                }
+                *seq += 1;
             }
             other => {
                 let msg = format!("Invalid menu input: '{}'", other.trim());
