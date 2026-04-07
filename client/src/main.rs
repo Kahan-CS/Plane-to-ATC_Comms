@@ -14,7 +14,12 @@
 ///   - CARs SOR/96-433 Part V (Airworthiness): safety-critical communications
 ///   - DO-178C DAL-D: deterministic startup, traceable operations
 ///
-/// REQ-CLT-010, REQ-CLT-030, REQ-SYS-080, REQ-PKT-061, REQ-LOG-010, REQ-LOG-030
+/// REQ-CLT-010/020/030/040/050/060/070/080
+/// REQ-SYS-040/070/080/090
+/// REQ-LOG-010/030/040/050/060
+/// REQ-COM-010/020/040/060
+
+mod buffer;
 mod heartbeat;
 mod logger;
 mod network;
@@ -22,20 +27,24 @@ mod packet;
 mod phases;
 mod receiver;
 
+use std::io::{self, BufRead, Write};
+use std::process;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+
+use buffer::{flush_buffer, HandoffBuffer};
 use heartbeat::spawn_heartbeat;
 use logger::Logger;
 use network::Connection;
 use packet::{
-    HandshakePayload, PKT_ACK, PKT_DISCONNECT, PKT_ERROR, PKT_HANDSHAKE, PKT_LARGE_DATA_REQUEST,
-    PKT_MAYDAY, Packet, PacketHeader,
+    HandshakePayload, Packet, PacketHeader, PKT_ACK, PKT_DISCONNECT, PKT_ERROR, PKT_HANDSHAKE,
+    PKT_HANDOFF_NOTIFY, PKT_LARGE_DATA_REQUEST, PKT_MAYDAY,
 };
 use phases::{build_landing_packet, build_takeoff_packet, build_transit_packet};
 use receiver::spawn_receiver;
 
-use std::io::{self, BufRead, Write};
-use std::process;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+/// Previous server ATC ID used on buffered handoff retransmission.
+const PREV_ATC_ID: u32 = 1;
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
@@ -75,9 +84,36 @@ fn main() {
     println!("Route    : {} -> {}", origin, dest);
     println!("Server   : {}", server_addr);
     println!();
-    println!("Connecting to ATC server...");
+    let mut handoff_buffer = HandoffBuffer::new(PREV_ATC_ID);
+    run_session(
+        &server_addr,
+        &callsign,
+        &ac_type,
+        &ac_model,
+        &origin,
+        &dest,
+        &logger,
+        &mut handoff_buffer,
+    );
 
-    let mut conn = Connection::connect(&server_addr).unwrap_or_else(|e| {
+    // REQ-LOG-060: session summary written on clean exit
+    logger.write_summary();
+}
+
+/// Connect, handshake, run menu, and reconnect when handoff is triggered.
+fn run_session(
+    server_addr: &str,
+    callsign: &str,
+    ac_type: &str,
+    ac_model: &str,
+    origin: &str,
+    dest: &str,
+    logger: &Arc<Logger>,
+    handoff_buffer: &mut HandoffBuffer,
+) {
+    println!("Connecting to ATC server at {}...", server_addr);
+
+    let mut conn = Connection::connect(server_addr).unwrap_or_else(|e| {
         logger.log_error(&format!("Terminal connection failure: {}", e));
         logger.write_summary();
         eprintln!("[FATAL] {}", e);
@@ -91,11 +127,11 @@ fn main() {
     let mut seq: u32 = 1;
 
     let hs_payload = HandshakePayload {
-        callsign: HandshakePayload::str_to_fixed(&callsign),
-        aircraft_type: HandshakePayload::str_to_fixed(&ac_type),
-        aircraft_model: HandshakePayload::str_to_fixed(&ac_model),
-        origin: HandshakePayload::str_to_fixed(&origin),
-        destination: HandshakePayload::str_to_fixed(&dest),
+        callsign: HandshakePayload::str_to_fixed(callsign),
+        aircraft_type: HandshakePayload::str_to_fixed(ac_type),
+        aircraft_model: HandshakePayload::str_to_fixed(ac_model),
+        origin: HandshakePayload::str_to_fixed(origin),
+        destination: HandshakePayload::str_to_fixed(dest),
     };
 
     // Capture length before move into Packet (avoids use-after-move)
@@ -109,7 +145,7 @@ fn main() {
             timestamp: current_timestamp(),
             payload_length: payload_len,
             origin_atc_id: 0,
-            aircraft_id: HandshakePayload::str_to_fixed(&callsign),
+            aircraft_id: HandshakePayload::str_to_fixed(callsign),
             emergency_flag: 0,
         },
         payload: payload_bytes,
@@ -130,40 +166,32 @@ fn main() {
         "HANDSHAKE",
         seq,
         payload_len,
-        &format!(
-            "{} {}/{} {} -> {}",
-            callsign, ac_type, ac_model, origin, dest
-        ),
+        &format!("{} {}/{} {} -> {}", callsign, ac_type, ac_model, origin, dest),
     );
     seq += 1;
 
     // Wait for ACK (REQ-SYS-080)
     match conn.recv_packet() {
         Ok(pkt) if pkt.header.packet_type == PKT_ACK => {
+            let ack_seq = pkt.header.seq_num;
+            let ack_len = pkt.header.payload_length;
             println!("[OK] Connection verified by ATC.");
-            logger.log_rx(
-                "ACK",
-                pkt.header.seq_num,
-                pkt.header.payload_length,
-                "handshake acknowledged",
-            );
+            logger.log_rx("ACK", ack_seq, ack_len, "handshake acknowledged");
         }
         Ok(pkt) if pkt.header.packet_type == PKT_ERROR => {
-            logger.log_error("ATC rejected handshake — PKT_ERROR received");
+            logger.log_error("ATC rejected handshake - PKT_ERROR received");
             logger.write_summary();
             eprintln!("[FATAL] ATC rejected handshake.");
             process::exit(5);
         }
         Ok(pkt) => {
+            let ptype = pkt.header.packet_type;
             logger.log_error(&format!(
                 "Unexpected packet type during handshake: 0x{:02X}",
-                pkt.header.packet_type
+                ptype
             ));
             logger.write_summary();
-            eprintln!(
-                "[FATAL] Unexpected response: 0x{:02X}",
-                pkt.header.packet_type
-            );
+            eprintln!("[FATAL] Unexpected response: 0x{:02X}", ptype);
             process::exit(6);
         }
         Err(e) => {
@@ -174,9 +202,13 @@ fn main() {
         }
     }
 
-    // Start background receiver so incoming ATC messages never block menu input.
+    if !handoff_buffer.is_empty() {
+        flush_buffer(handoff_buffer, &mut conn, logger.as_ref());
+    }
+
     let alive = Arc::new(AtomicBool::new(true));
     let handoff_flag = Arc::new(AtomicBool::new(false));
+
     let recv_stream = conn.stream.try_clone().unwrap_or_else(|e| {
         logger.log_error(&format!("Failed to clone stream for receiver: {}", e));
         logger.write_summary();
@@ -185,7 +217,7 @@ fn main() {
     });
     let _recv_handle = spawn_receiver(
         recv_stream,
-        Arc::clone(&logger),
+        Arc::clone(logger),
         Arc::clone(&alive),
         Arc::clone(&handoff_flag),
     );
@@ -197,20 +229,49 @@ fn main() {
         eprintln!("[FATAL] Cannot start heartbeat thread: {}", e);
         process::exit(9);
     });
-    let _hb_handle = spawn_heartbeat(hb_stream, Arc::clone(&alive), callsign.clone());
+    let _hb_handle = spawn_heartbeat(hb_stream, Arc::clone(&alive), callsign.to_string());
 
     // Interactive menu (REQ-SYS-040)
-    run_menu(
+
+    let did_handoff = run_menu(
         &mut conn,
         &mut seq,
-        &callsign,
-        &logger,
+        callsign,
+        logger,
         &alive,
         &handoff_flag,
+        handoff_buffer,
     );
 
-    // REQ-LOG-060: session summary written on clean exit
-    logger.write_summary();
+    if did_handoff {
+        println!();
+        println!(
+            "[Handoff] Enter next ATC server (ip:port), or press Enter to reuse {}",
+            server_addr
+        );
+        print!("New server: ");
+        io::stdout().flush().ok();
+
+        let mut next = String::new();
+        io::stdin().read_line(&mut next).ok();
+        let next_server = if next.trim().is_empty() {
+            server_addr.to_string()
+        } else {
+            next.trim().to_string()
+        };
+
+        logger.log_connection(&format!("Handoff reconnect to {}", next_server));
+        run_session(
+            &next_server,
+            callsign,
+            ac_type,
+            ac_model,
+            origin,
+            dest,
+            logger,
+            handoff_buffer,
+        );
+    }
 }
 
 /// Main interactive menu loop.
@@ -223,19 +284,21 @@ fn run_menu(
     logger: &Arc<Logger>,
     alive: &Arc<AtomicBool>,
     handoff_flag: &Arc<AtomicBool>,
-) {
+    handoff_buffer: &mut HandoffBuffer,
+) -> bool {
     let stdin = io::stdin();
     loop {
         if !alive.load(Ordering::SeqCst) {
             println!("\n[NET] Connection lost. Exiting interactive menu.");
             logger.log_connection("Connection lost detected by receiver thread");
-            break;
+            break false;
         }
 
         if handoff_flag.load(Ordering::SeqCst) {
-            println!("\n[ATC] Handoff notice active. Reconnect flow will be added in Commit-11.");
+            println!("\n[ATC] Handoff notice active. Reconnecting to next ATC...");
             logger.log_connection("Handoff notify flag raised by receiver thread");
             handoff_flag.store(false, Ordering::SeqCst);
+            return true;
         }
 
         println!();
@@ -246,6 +309,7 @@ fn run_menu(
         println!("│  4. MAYDAY  !!!!!                               │");
         println!("│  5. Disconnect / Inactive                       │");
         println!("│  6. Request Weather Data (large transfer)       │");
+        println!("│  7. Trigger ATC Handoff (simulate)              │");
         println!("└─────────────┘");
         print!("Select option: ");
         io::stdout().flush().ok();
@@ -253,54 +317,21 @@ fn run_menu(
         let mut input = String::new();
         if stdin.lock().read_line(&mut input).is_err() {
             logger.log_error("Failed to read user input — exiting menu");
-            break;
+            break false;
         }
 
         match input.trim() {
             "1" => {
                 let pkt = build_takeoff_packet(*seq, callsign, current_timestamp());
-                let plen = pkt.header.payload_length;
-                match conn.send_packet(&pkt) {
-                    Ok(_) => {
-                        logger.log_tx("TAKEOFF", *seq, plen, "takeoff telemetry sent");
-                        println!("[Takeoff] Telemetry sent.");
-                    }
-                    Err(e) => {
-                        logger.log_error(&format!("TAKEOFF send failed: {}", e));
-                        println!("[Takeoff] Send failed: {}", e);
-                    }
-                }
-                *seq += 1;
+                send_or_buffer(conn, pkt, seq, "TAKEOFF", logger, handoff_buffer, alive);
             }
             "2" => {
                 let pkt = build_transit_packet(*seq, callsign, current_timestamp());
-                let plen = pkt.header.payload_length;
-                match conn.send_packet(&pkt) {
-                    Ok(_) => {
-                        logger.log_tx("TRANSIT", *seq, plen, "transit telemetry sent");
-                        println!("[Transit] Telemetry sent.");
-                    }
-                    Err(e) => {
-                        logger.log_error(&format!("TRANSIT send failed: {}", e));
-                        println!("[Transit] Send failed: {}", e);
-                    }
-                }
-                *seq += 1;
+                send_or_buffer(conn, pkt, seq, "TRANSIT", logger, handoff_buffer, alive);
             }
             "3" => {
                 let pkt = build_landing_packet(*seq, callsign, current_timestamp());
-                let plen = pkt.header.payload_length;
-                match conn.send_packet(&pkt) {
-                    Ok(_) => {
-                        logger.log_tx("LANDING", *seq, plen, "landing telemetry sent");
-                        println!("[Landing] Telemetry sent.");
-                    }
-                    Err(e) => {
-                        logger.log_error(&format!("LANDING send failed: {}", e));
-                        println!("[Landing] Send failed: {}", e);
-                    }
-                }
-                *seq += 1;
+                send_or_buffer(conn, pkt, seq, "LANDING", logger, handoff_buffer, alive);
             }
             "4" => {
                 // REQ-CLT-050, REQ-PKT-062: MAYDAY sets emergency_flag=1
@@ -318,22 +349,12 @@ fn run_menu(
                     },
                     payload: vec![],
                 };
-                match conn.send_packet(&pkt) {
-                    Ok(_) => {
-                        logger.log_mayday(*seq);
-                        println!("[MAYDAY] Emergency signal sent.");
-                    }
-                    Err(e) => {
-                        logger.log_error(&format!("MAYDAY send failed: {}", e));
-                        println!("[MAYDAY] Send failed: {}", e);
-                    }
-                }
-                *seq += 1;
+                send_or_buffer(conn, pkt, seq, "MAYDAY", logger, handoff_buffer, alive);
             }
             "5" => {
                 send_disconnect(conn, seq, callsign, logger.as_ref());
                 println!("Disconnected. Goodbye.");
-                break;
+                break false;
             }
             "6" => {
                 // REQ-SYS-070: request >= 1 MB weather/telemetry data from server
@@ -350,22 +371,35 @@ fn run_menu(
                     },
                     payload: vec![],
                 };
-                match conn.send_packet(&pkt) {
-                    Ok(_) => {
-                        logger.log_tx(
-                            "LARGE_DATA_REQUEST",
-                            *seq,
-                            0,
-                            "requested weather/telemetry object >=1MB",
-                        );
-                        println!("[Weather] Request sent - awaiting data (see receiver)...");
-                    }
-                    Err(e) => {
-                        logger.log_error(&format!("LARGE_DATA_REQUEST send failed: {}", e));
-                        println!("[Weather] Request failed: {}", e);
-                    }
-                }
+                send_or_buffer(
+                    conn,
+                    pkt,
+                    seq,
+                    "LARGE_DATA_REQUEST",
+                    logger,
+                    handoff_buffer,
+                    alive,
+                );
+            }
+            "7" => {
+                println!("[Handoff] Triggering ATC handoff...");
+                logger.log_connection("Handoff triggered by pilot (menu option 7)");
+                let pkt = Packet {
+                    header: PacketHeader {
+                        packet_type: PKT_HANDOFF_NOTIFY,
+                        seq_num: *seq,
+                        timestamp: current_timestamp(),
+                        payload_length: 0,
+                        origin_atc_id: PREV_ATC_ID,
+                        aircraft_id: HandshakePayload::str_to_fixed(callsign),
+                        emergency_flag: 0,
+                    },
+                    payload: vec![],
+                };
+                conn.send_packet(&pkt).ok();
+                logger.log_tx("HANDOFF_NOTIFY", *seq, 0, "pilot-initiated handoff");
                 *seq += 1;
+                return true;
             }
             other => {
                 let msg = format!("Invalid menu input: '{}'", other.trim());
@@ -376,7 +410,39 @@ fn run_menu(
     }
 }
 
-/// Send PKT_DISCONNECT cleanly before exiting.
+/// Send packet, or buffer it for handoff retransmission on failure.
+fn send_or_buffer(
+    conn: &mut Connection,
+    pkt: Packet,
+    seq: &mut u32,
+    ptype_str: &str,
+    logger: &Arc<Logger>,
+    buffer: &mut HandoffBuffer,
+    alive: &Arc<AtomicBool>,
+) {
+    let plen = pkt.header.payload_length;
+    match conn.send_packet(&pkt) {
+        Ok(_) => {
+            if ptype_str == "MAYDAY" {
+                logger.log_mayday(*seq);
+            } else {
+                logger.log_tx(ptype_str, *seq, plen, &format!("{} sent", ptype_str));
+            }
+        }
+        Err(e) => {
+            logger.log_error(&format!("{} send failed: {}", ptype_str, e));
+            buffer.push(pkt);
+            logger.log_connection(&format!(
+                "Buffered failed packet for handoff: type={} seq={}",
+                ptype_str, *seq
+            ));
+            alive.store(false, Ordering::SeqCst);
+        }
+    }
+    *seq += 1;
+}
+
+/// Send PKT_DISCONNECT cleanly.
 fn send_disconnect(conn: &mut Connection, seq: &mut u32, callsign: &str, logger: &Logger) {
     let pkt = Packet {
         header: PacketHeader {
