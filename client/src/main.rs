@@ -15,22 +15,24 @@
 ///   - DO-178C DAL-D: deterministic startup, traceable operations
 ///
 /// REQ-CLT-010, REQ-CLT-030, REQ-SYS-080, REQ-PKT-061, REQ-LOG-010, REQ-LOG-030
-
 mod logger;
 mod network;
 mod packet;
 mod phases;
+mod receiver;
 
 use logger::Logger;
 use network::Connection;
-use phases::{build_landing_packet, build_takeoff_packet, build_transit_packet};
 use packet::{
-    HandshakePayload, Packet, PacketHeader,
-    PKT_ACK, PKT_DISCONNECT, PKT_ERROR, PKT_HANDSHAKE,
+    HandshakePayload, PKT_ACK, PKT_DISCONNECT, PKT_ERROR, PKT_HANDSHAKE, Packet, PacketHeader,
 };
+use phases::{build_landing_packet, build_takeoff_packet, build_transit_packet};
+use receiver::spawn_receiver;
 
 use std::io::{self, BufRead, Write};
 use std::process;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
@@ -55,10 +57,10 @@ fn main() {
     let dest = args[7].clone();
 
     // REQ-LOG-010, REQ-LOG-040: create timestamped log file at startup
-    let logger = Logger::new("atc_client").unwrap_or_else(|e| {
+    let logger = Arc::new(Logger::new("atc_client").unwrap_or_else(|e| {
         eprintln!("[FATAL] Cannot create log file: {}", e);
         process::exit(2);
-    });
+    }));
     logger.log_connection(&format!(
         "Session started — {} ({}/{}) {} -> {}",
         callsign, ac_type, ac_model, origin, dest
@@ -95,7 +97,7 @@ fn main() {
 
     // Capture length before move into Packet (avoids use-after-move)
     let payload_bytes = hs_payload.to_bytes();
-    let payload_len   = payload_bytes.len() as u32;
+    let payload_len = payload_bytes.len() as u32;
 
     let handshake = Packet {
         header: PacketHeader {
@@ -125,7 +127,10 @@ fn main() {
         "HANDSHAKE",
         seq,
         payload_len,
-        &format!("{} {}/{} {} -> {}", callsign, ac_type, ac_model, origin, dest),
+        &format!(
+            "{} {}/{} {} -> {}",
+            callsign, ac_type, ac_model, origin, dest
+        ),
     );
     seq += 1;
 
@@ -133,8 +138,12 @@ fn main() {
     match conn.recv_packet() {
         Ok(pkt) if pkt.header.packet_type == PKT_ACK => {
             println!("[OK] Connection verified by ATC.");
-            logger.log_rx("ACK", pkt.header.seq_num, pkt.header.payload_length,
-                "handshake acknowledged");
+            logger.log_rx(
+                "ACK",
+                pkt.header.seq_num,
+                pkt.header.payload_length,
+                "handshake acknowledged",
+            );
         }
         Ok(pkt) if pkt.header.packet_type == PKT_ERROR => {
             logger.log_error("ATC rejected handshake — PKT_ERROR received");
@@ -148,7 +157,10 @@ fn main() {
                 pkt.header.packet_type
             ));
             logger.write_summary();
-            eprintln!("[FATAL] Unexpected response: 0x{:02X}", pkt.header.packet_type);
+            eprintln!(
+                "[FATAL] Unexpected response: 0x{:02X}",
+                pkt.header.packet_type
+            );
             process::exit(6);
         }
         Err(e) => {
@@ -159,8 +171,31 @@ fn main() {
         }
     }
 
+    // Start background receiver so incoming ATC messages never block menu input.
+    let alive = Arc::new(AtomicBool::new(true));
+    let handoff_flag = Arc::new(AtomicBool::new(false));
+    let recv_stream = conn.stream.try_clone().unwrap_or_else(|e| {
+        logger.log_error(&format!("Failed to clone stream for receiver: {}", e));
+        logger.write_summary();
+        eprintln!("[FATAL] Cannot start receiver thread: {}", e);
+        process::exit(8);
+    });
+    let _recv_handle = spawn_receiver(
+        recv_stream,
+        Arc::clone(&logger),
+        Arc::clone(&alive),
+        Arc::clone(&handoff_flag),
+    );
+
     // Interactive menu (REQ-SYS-040)
-    run_menu(&mut conn, &mut seq, &callsign, &logger);
+    run_menu(
+        &mut conn,
+        &mut seq,
+        &callsign,
+        &logger,
+        &alive,
+        &handoff_flag,
+    );
 
     // REQ-LOG-060: session summary written on clean exit
     logger.write_summary();
@@ -169,9 +204,28 @@ fn main() {
 /// Main interactive menu loop.
 /// Options shown at every prompt: pilot selects by number (REQ-SYS-040).
 /// Logger passed in so every menu action is recorded (REQ-LOG-030).
-fn run_menu(conn: &mut Connection, seq: &mut u32, callsign: &str, logger: &Logger) {
+fn run_menu(
+    conn: &mut Connection,
+    seq: &mut u32,
+    callsign: &str,
+    logger: &Arc<Logger>,
+    alive: &Arc<AtomicBool>,
+    handoff_flag: &Arc<AtomicBool>,
+) {
     let stdin = io::stdin();
     loop {
+        if !alive.load(Ordering::SeqCst) {
+            println!("\n[NET] Connection lost. Exiting interactive menu.");
+            logger.log_connection("Connection lost detected by receiver thread");
+            break;
+        }
+
+        if handoff_flag.load(Ordering::SeqCst) {
+            println!("\n[ATC] Handoff notice active. Reconnect flow will be added in Commit-11.");
+            logger.log_connection("Handoff notify flag raised by receiver thread");
+            handoff_flag.store(false, Ordering::SeqCst);
+        }
+
         println!();
         println!("┌─ATC Cockpit Menu ─────────┐");
         println!("│  1. Takeoff                                     │");
@@ -241,7 +295,7 @@ fn run_menu(conn: &mut Connection, seq: &mut u32, callsign: &str, logger: &Logge
                 // TODO : set emergency_flag in header and send PKT_MAYDAY
             }
             "5" => {
-                send_disconnect(conn, seq, callsign, logger);
+                send_disconnect(conn, seq, callsign, logger.as_ref());
                 println!("Disconnected. Goodbye.");
                 break;
             }
@@ -262,19 +316,19 @@ fn run_menu(conn: &mut Connection, seq: &mut u32, callsign: &str, logger: &Logge
 fn send_disconnect(conn: &mut Connection, seq: &mut u32, callsign: &str, logger: &Logger) {
     let pkt = Packet {
         header: PacketHeader {
-            packet_type:    PKT_DISCONNECT,
-            seq_num:        *seq,
-            timestamp:      current_timestamp(),
+            packet_type: PKT_DISCONNECT,
+            seq_num: *seq,
+            timestamp: current_timestamp(),
             payload_length: 0,
-            origin_atc_id:  0,
-            aircraft_id:    HandshakePayload::str_to_fixed(callsign),
+            origin_atc_id: 0,
+            aircraft_id: HandshakePayload::str_to_fixed(callsign),
             emergency_flag: 0,
         },
         payload: vec![],
     };
 
     match conn.send_packet(&pkt) {
-        Ok(_)  => logger.log_tx("DISCONNECT", *seq, 0, "graceful disconnect"),
+        Ok(_) => logger.log_tx("DISCONNECT", *seq, 0, "graceful disconnect"),
         Err(e) => logger.log_error(&format!("DISCONNECT send failed: {}", e)),
     }
     *seq += 1;
