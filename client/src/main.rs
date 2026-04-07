@@ -15,17 +15,19 @@
 ///   - DO-178C DAL-D: deterministic startup, traceable operations
 ///
 /// REQ-CLT-010, REQ-CLT-030, REQ-SYS-080, REQ-PKT-061, REQ-LOG-010, REQ-LOG-030
+mod heartbeat;
 mod logger;
 mod network;
 mod packet;
 mod phases;
 mod receiver;
 
+use heartbeat::spawn_heartbeat;
 use logger::Logger;
 use network::Connection;
 use packet::{
-    HandshakePayload, PKT_ACK, PKT_DISCONNECT, PKT_ERROR, PKT_HANDSHAKE,
-    PKT_LARGE_DATA_REQUEST, PKT_MAYDAY, Packet, PacketHeader,
+    HandshakePayload, PKT_ACK, PKT_DISCONNECT, PKT_ERROR, PKT_HANDSHAKE, PKT_LARGE_DATA_REQUEST,
+    PKT_MAYDAY, Packet, PacketHeader,
 };
 use phases::{build_landing_packet, build_takeoff_packet, build_transit_packet};
 use receiver::spawn_receiver;
@@ -187,6 +189,15 @@ fn main() {
         Arc::clone(&alive),
         Arc::clone(&handoff_flag),
     );
+
+    // active keepalive thread for early connection-loss detection.
+    let hb_stream = conn.stream.try_clone().unwrap_or_else(|e| {
+        logger.log_error(&format!("Failed to clone stream for heartbeat: {}", e));
+        logger.write_summary();
+        eprintln!("[FATAL] Cannot start heartbeat thread: {}", e);
+        process::exit(9);
+    });
+    let _hb_handle = spawn_heartbeat(hb_stream, Arc::clone(&alive), callsign.clone());
 
     // Interactive menu (REQ-SYS-040)
     run_menu(
