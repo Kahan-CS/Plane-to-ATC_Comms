@@ -2,37 +2,28 @@
  * @file main.c
  * @brief ATC Ground Control Server
  *
- * Functionality:
- *  - Listen for incoming TCP client connections on a configurable port (REQ-SVR-010)
- *  - Accept and verify connections via handshake exchange
- *  - Receive and parse all structured data packets; display flight information (REQ-SVR-020)
- *  - Detect and visually flag MAYDAY emergency packets (REQ-SVR-030)
- *  - Detect and process buffered handoff packets (REQ-SVR-040)
- *  - Transmit >= 1 MB weather/telemetry data on request (REQ-SVR-050)
- *  - Display session log of connected aircraft and current phase (REQ-SVR-060)
- *  - Send phase-appropriate ATC instructions to the client (REQ-SVR-070)
- *  - Enforce state machine: IDLE->HANDSHAKE->TAKEOFF->TRANSIT->LANDING->DISCONNECTED (REQ-STM-010/020/030)
- *  - Transition to MAYDAY sub-state from any active flight state (REQ-STM-040)
- *  - Log all events with flush-per-write; emit session summary at shutdown (REQ-LOG-010/060)
- *
- * Usage: atc-server <PORT>
- *
- * Regulatory compliance:
- *   - CARs SOR/96-433 Part V (Airworthiness)
- *   - DO-178C DAL-D guidance (deterministic state machine, traceable logging)
- *
  * State flow:
  *   IDLE -> HANDSHAKE -> TAKEOFF -> TRANSIT -> LANDING -> DISCONNECTED -> IDLE
- *   - HANDSHAKE->TAKEOFF: automatic after handshake verified
+ *   - HANDSHAKE->TAKEOFF: when client sends PKT_TAKEOFF
  *   - TAKEOFF->TRANSIT:   when client sends PKT_TRANSIT
  *   - TRANSIT->LANDING:   when client sends PKT_LANDING
  *   - MAYDAY:             from any active state (TAKEOFF/TRANSIT/LANDING)
+ *
+ * Usage: gcc main.c -o main -lws2_32 && .\main.exe <PORT>
+ *
+ * Regulatory: CARs SOR/96-433 Part V · DO-178C DAL-D
+ *
+ * REQ-SVR-010/020/030/040/050/060/070
+ * REQ-STM-010/020/030/040
+ * REQ-LOG-010/020/060
+ * REQ-COM-010/060
+ * REQ-PKT-031/034
  */
 
- /*Command to run the server:
-  gcc main.c -o main -lws2_32
-  .\main.exe <PORT_NUMBER>
- */
+/* Server keepalive interval. The Rust client's receiver thread has a
+ * 10-second read timeout. We must send *something* to the client more
+ * often than that to prevent the receiver from declaring connection lost. */
+#define SERVER_KEEPALIVE_INTERVAL_MS 8000LL
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -43,6 +34,40 @@
 #include "include/server_config.h"
 #include "include/state_machine.h"
 #include "include/network.h"
+
+
+/* ================================================================
+ *  Payload byte-order helpers
+ *  (Rust client sends all multi-byte payload fields in big-endian)
+ * ================================================================ */
+
+static inline float swap_float(float f) {
+    uint32_t tmp;
+    memcpy(&tmp, &f, 4);
+    tmp = ntohl(tmp);
+    float result;
+    memcpy(&result, &tmp, 4);
+    return result;
+}
+
+static inline uint16_t swap_u16(uint16_t v) {
+    return ntohs(v);
+}
+
+static inline int64_t swap_i64(int64_t v) {
+    return (int64_t)swap64((uint64_t)v);
+}
+
+
+/* ================================================================
+ *  Keepalive — empty PKT_ACK to prevent client receiver timeout
+ * ================================================================ */
+
+static int send_server_keepalive(SOCKET sockfd, const char *aircraft_id) {
+    PacketHeader hdr;
+    build_header(&hdr, PKT_ACK, 0, aircraft_id);
+    return send_packet(sockfd, &hdr, NULL);
+}
 
 
 /* ================================================================
@@ -67,6 +92,13 @@ static void handle_client(SOCKET client_fd) {
     ATCState state = STATE_IDLE;
     ATCState prev  = STATE_IDLE;
     char     aircraft_id[32] = {0};
+
+    /* Tracks the last time the server sent ANY packet to the client.
+     * Used to decide when a keepalive is needed.
+     * IMPORTANT: only reset this when we actually SEND to the client,
+     * never when we RECEIVE from it — the client's receiver thread
+     * only cares about server->client traffic for its timeout. */
+    int64_t last_send_ms = now_ms();
 
     g_session_count++;
 
@@ -95,7 +127,21 @@ static void handle_client(SOCKET client_fd) {
         struct timeval tv = { 1, 0 };
         FD_ZERO(&rfds);
         FD_SET(client_fd, &rfds);
-        if (select(0, &rfds, NULL, NULL, &tv) <= 0) continue;
+        int ready = select(0, &rfds, NULL, NULL, &tv);
+
+        if (ready <= 0) {
+            /* No data from client. Check if we need to send a keepalive. */
+            int64_t elapsed = now_ms() - last_send_ms;
+            if (elapsed >= SERVER_KEEPALIVE_INTERVAL_MS) {
+                if (send_server_keepalive(client_fd, aircraft_id) != 0) {
+                    printf("[ATC] Connection lost (keepalive send failed).\n");
+                    log_info("Connection lost - keepalive send failed");
+                    goto session_end;
+                }
+                last_send_ms = now_ms();
+            }
+            continue;
+        }
 
         PacketHeader hdr;
         uint8_t     *payload = NULL;
@@ -128,6 +174,7 @@ static void handle_client(SOCKET client_fd) {
             }
 
             send_ack(client_fd, hdr.seq_num, aircraft_id);
+            last_send_ms = now_ms();
             free(payload); continue;
         }
 
@@ -139,13 +186,15 @@ static void handle_client(SOCKET client_fd) {
             log_info(m);
         }
 
-        /* Log incoming packet. */
-        char summary[256] = "(empty)";
-        if (payload && hdr.payload_length > 0) {
-            size_t n = hdr.payload_length < 128 ? hdr.payload_length : 128;
-            snprintf(summary, sizeof(summary), "%.*s", (int)n, (char *)payload);
+        /* Log incoming packet (skip logging heartbeats to reduce noise). */
+        if (hdr.packet_type != PKT_ACK) {
+            char summary[256] = "(empty)";
+            if (payload && hdr.payload_length > 0) {
+                size_t n = hdr.payload_length < 128 ? hdr.payload_length : 128;
+                snprintf(summary, sizeof(summary), "%.*s", (int)n, (char *)payload);
+            }
+            log_packet("FROM", type_str, hdr.seq_num, hdr.payload_length, hdr.emergency_flag, summary);
         }
-        log_packet("FROM", type_str, hdr.seq_num, hdr.payload_length, hdr.emergency_flag, summary);
 
         /* ---- Dispatch ---- */
         switch (hdr.packet_type) {
@@ -154,6 +203,7 @@ static void handle_client(SOCKET client_fd) {
         case PKT_HANDSHAKE: {
             if (state != STATE_HANDSHAKE) {
                 send_error_pkt(client_fd, "HANDSHAKE not expected in current state", aircraft_id);
+                last_send_ms = now_ms();
                 break;
             }
             printf("[ATC] HANDSHAKE from: %s\n", hdr.aircraft_id);
@@ -172,24 +222,31 @@ static void handle_client(SOCKET client_fd) {
             if (hdr.aircraft_id[0] == '\0') {
                 send_error_pkt(client_fd, "aircraft_id is empty - handshake rejected", aircraft_id);
                 log_error("Handshake rejected: empty aircraft_id");
+                last_send_ms = now_ms();
                 break;
             }
 
-            /* HANDSHAKE -> TAKEOFF (automatic after verification) */
-            prev = state; state = STATE_TAKEOFF;
-            log_state_transition(prev, state, "Handshake verified");
-            printf("[ATC] Handshake VERIFIED. State: %s -> %s\n",
-                   state_to_str(prev), state_to_str(state));
+            printf("[ATC] Handshake VERIFIED. Waiting for takeoff.\n");
             display_session_status(aircraft_id, state);
             send_ack(client_fd, hdr.seq_num, aircraft_id);
+            //send_server_keepalive(client_fd, aircraft_id);
+            last_send_ms = now_ms();
             break;
         }
 
-        /* ---- TAKEOFF (stays in TAKEOFF until client sends TRANSIT) ---- */
+        /* ---- TAKEOFF ---- */
         case PKT_TAKEOFF: {
-            if (state != STATE_TAKEOFF) {
+            if (state != STATE_HANDSHAKE && state != STATE_TAKEOFF) {
                 send_error_pkt(client_fd, "TAKEOFF not valid in current state", aircraft_id);
+                last_send_ms = now_ms();
                 break;
+            }
+
+            if (state == STATE_HANDSHAKE) {
+                prev = state; state = STATE_TAKEOFF;
+                log_state_transition(prev, state, "Takeoff packet received");
+                printf("[ATC] State: %s -> %s\n", state_to_str(prev), state_to_str(state));
+                display_session_status(aircraft_id, state);
             }
 
             float    heading = 0.0f, altitude = 0.0f, spd = 0.0f, clmb = 0.0f;
@@ -198,42 +255,63 @@ static void handle_client(SOCKET client_fd) {
 
             printf("[ATC] TAKEOFF telemetry from: %s\n", aircraft_id);
             if (payload && hdr.payload_length >= sizeof(TakeoffPayload)) {
-                const TakeoffPayload *tk = (const TakeoffPayload *)payload;
-                heading  = tk->assigned_heading;
-                altitude = tk->assigned_altitude;
-                spd      = tk->speed_off_runway;
-                clmb     = tk->initial_climb_rate;
-                squawk   = tk->squawk_code;
-                clr_type = tk->clearance_type;
-                printf("[ATC]   Clearance    : %s\n",   clr_type == 0 ? "IFR" : "VFR");
-                printf("[ATC]   Squawk       : %04o\n", squawk);
+                TakeoffPayload tk_host;
+                memcpy(&tk_host, payload, sizeof(TakeoffPayload));
+
+                tk_host.departure_time     = swap_i64(tk_host.departure_time);
+                tk_host.assigned_heading   = swap_float(tk_host.assigned_heading);
+                tk_host.assigned_altitude  = swap_float(tk_host.assigned_altitude);
+                tk_host.squawk_code        = swap_u16(tk_host.squawk_code);
+                tk_host.wind_speed         = swap_float(tk_host.wind_speed);
+                tk_host.wind_direction     = swap_float(tk_host.wind_direction);
+                tk_host.speed_off_runway   = swap_float(tk_host.speed_off_runway);
+                tk_host.initial_climb_rate = swap_float(tk_host.initial_climb_rate);
+
+                heading  = tk_host.assigned_heading;
+                altitude = tk_host.assigned_altitude;
+                spd      = tk_host.speed_off_runway;
+                clmb     = tk_host.initial_climb_rate;
+                squawk   = tk_host.squawk_code;
+                clr_type = tk_host.clearance_type;
+
+                printf("[ATC]   Clearance    : %s\n",       clr_type == 0 ? "IFR" : "VFR");
+                printf("[ATC]   Squawk       : %04o\n",     squawk);
                 printf("[ATC]   Heading      : %.1f deg\n", heading);
                 printf("[ATC]   Altitude     : %.0f ft MSL\n", altitude);
+                printf("[ATC]   Wind Speed   : %.1f kts\n", tk_host.wind_speed);
+                printf("[ATC]   Wind Dir     : %.1f deg\n", tk_host.wind_direction);
                 printf("[ATC]   Runway Speed : %.1f kts\n", spd);
                 printf("[ATC]   Climb Rate   : %.0f fpm\n", clmb);
             } else {
                 printf("[ATC]   (payload too small for TakeoffPayload)\n");
             }
 
-            send_ack(client_fd, hdr.seq_num, aircraft_id);
-
-            /* REQ-SVR-070: Departure clearance. */
+            /* REQ-SVR-070: Send departure clearance to client as ACK payload. */
             {
-                char clearance[160];
+                char clearance[200];
                 snprintf(clearance, sizeof(clearance),
-                         "[DEPARTURE CLEARANCE] %s CLEARED %s. "
-                         "MAINTAIN HDG %.0f, CLIMB AND MAINTAIN %.0f FT, SQUAWK %04o.",
+                         "[DEPARTURE CLEARANCE] %s CLEARED %s. HDG %.0f, ALT %.0f FT, SQUAWK %04o.",
                          aircraft_id, clr_type == 0 ? "IFR" : "VFR",
                          heading, altitude, squawk);
-                send_atc_clearance(client_fd, clearance, aircraft_id);
+
+                PacketHeader ack_hdr;
+                build_header(&ack_hdr, PKT_ACK, (uint32_t)strlen(clearance), aircraft_id);
+                send_packet(client_fd, &ack_hdr, clearance);
+
+                printf("[ATC] CLEARANCE: %s\n", clearance);
+                char log_sum[256];
+                snprintf(log_sum, sizeof(log_sum), "ACK+CLEARANCE for seq=%u: %.200s", hdr.seq_num, clearance);
+                log_packet("TO", "ACK", ack_hdr.seq_num, ack_hdr.payload_length, 0, log_sum);
+                last_send_ms = now_ms();
             }
             break;
         }
 
-        /* ---- TRANSIT (transitions TAKEOFF->TRANSIT on first packet) ---- */
+        /* ---- TRANSIT ---- */
         case PKT_TRANSIT: {
             if (state != STATE_TAKEOFF && state != STATE_TRANSIT) {
                 send_error_pkt(client_fd, "TRANSIT not valid in current state", aircraft_id);
+                last_send_ms = now_ms();
                 break;
             }
 
@@ -246,23 +324,32 @@ static void handle_client(SOCKET client_fd) {
 
             printf("[ATC] TRANSIT telemetry from: %s\n", aircraft_id);
             if (payload && hdr.payload_length >= sizeof(TransitPayload)) {
-                const TransitPayload *tr = (const TransitPayload *)payload;
-                printf("[ATC]   Speed    : %.1f kts\n",    tr->speed);
-                printf("[ATC]   Altitude : %.0f ft MSL\n", tr->altitude);
-                printf("[ATC]   Heading  : %.1f deg\n",    tr->heading);
-                printf("[ATC]   Squawk   : %04o\n",        tr->squawk_code);
+                TransitPayload tr_host;
+                memcpy(&tr_host, payload, sizeof(TransitPayload));
+
+                tr_host.speed       = swap_float(tr_host.speed);
+                tr_host.altitude    = swap_float(tr_host.altitude);
+                tr_host.heading     = swap_float(tr_host.heading);
+                tr_host.squawk_code = swap_u16(tr_host.squawk_code);
+
+                printf("[ATC]   Speed    : %.1f kts\n",    tr_host.speed);
+                printf("[ATC]   Altitude : %.0f ft MSL\n", tr_host.altitude);
+                printf("[ATC]   Heading  : %.1f deg\n",    tr_host.heading);
+                printf("[ATC]   Squawk   : %04o\n",        tr_host.squawk_code);
             } else {
                 printf("[ATC]   (payload too small for TransitPayload)\n");
             }
 
-            send_ack(client_fd, hdr.seq_num, aircraft_id);
-            break;
+                    send_ack(client_fd, hdr.seq_num, aircraft_id);
+                    last_send_ms = now_ms();
+                    break;
         }
 
-        /* ---- LANDING (transitions TRANSIT->LANDING on first packet) ---- */
+        /* ---- LANDING ---- */
         case PKT_LANDING: {
             if (state != STATE_TRANSIT && state != STATE_LANDING) {
                 send_error_pkt(client_fd, "LANDING not valid in current state", aircraft_id);
+                last_send_ms = now_ms();
                 break;
             }
 
@@ -279,35 +366,51 @@ static void handle_client(SOCKET client_fd) {
 
             printf("[ATC] LANDING telemetry from: %s\n", aircraft_id);
             if (payload && hdr.payload_length >= sizeof(LandingPayload)) {
-                const LandingPayload *ld = (const LandingPayload *)payload;
-                apspd          = ld->approach_speed;
-                alt            = ld->current_altitude;
-                hdg            = ld->heading;
-                approach_clear = ld->approach_clearance;
-                strncpy(runway, ld->assigned_runway, 4);
+                LandingPayload ld_host;
+                memcpy(&ld_host, payload, sizeof(LandingPayload));
+
+                ld_host.approach_speed   = swap_float(ld_host.approach_speed);
+                ld_host.current_altitude = swap_float(ld_host.current_altitude);
+                ld_host.heading          = swap_float(ld_host.heading);
+                ld_host.wind_shear       = swap_float(ld_host.wind_shear);
+                ld_host.visibility       = swap_float(ld_host.visibility);
+
+                apspd          = ld_host.approach_speed;
+                alt            = ld_host.current_altitude;
+                hdg            = ld_host.heading;
+                approach_clear = ld_host.approach_clearance;
+                strncpy(runway, ld_host.assigned_runway, 4);
                 runway[4] = '\0';
-                printf("[ATC]   Approach Speed : %.1f kts\n",   apspd);
+
+                printf("[ATC]   Approach Speed : %.1f kts\n",    apspd);
                 printf("[ATC]   Altitude       : %.0f ft MSL\n", alt);
                 printf("[ATC]   Heading        : %.1f deg\n",    hdg);
                 printf("[ATC]   Runway         : %s\n",          runway);
                 printf("[ATC]   Approach Clear : %s\n",          approach_clear ? "YES" : "NO");
-                printf("[ATC]   Wind Shear     : %.1f kts\n",   ld->wind_shear);
-                printf("[ATC]   Visibility     : %.1f SM\n",    ld->visibility);
+                printf("[ATC]   Wind Shear     : %.1f kts\n",   ld_host.wind_shear);
+                printf("[ATC]   Visibility     : %.1f SM\n",    ld_host.visibility);
             } else {
                 printf("[ATC]   (payload too small for LandingPayload)\n");
             }
 
-            send_ack(client_fd, hdr.seq_num, aircraft_id);
-
-            /* REQ-SVR-070: Landing clearance. */
+          /* REQ-SVR-070: Send landing clearance to client as ACK payload. */
             {
-                char instr[160];
-                snprintf(instr, sizeof(instr),
+                char clearance[200];
+                snprintf(clearance, sizeof(clearance),
                          "[LANDING CLEARANCE] %s RWY %s %s. GO-AROUND: %s.",
                          aircraft_id, runway,
                          approach_clear ? "CLEARED TO LAND" : "NOT CLEARED - HOLD SHORT",
                          approach_clear ? "NEGATIVE"         : "AFFIRM IF UNABLE TO LAND");
-                send_atc_clearance(client_fd, instr, aircraft_id);
+
+                PacketHeader ack_hdr;
+                build_header(&ack_hdr, PKT_ACK, (uint32_t)strlen(clearance), aircraft_id);
+                send_packet(client_fd, &ack_hdr, clearance);
+
+                printf("[ATC] CLEARANCE: %s\n", clearance);
+                char log_sum[256];
+                snprintf(log_sum, sizeof(log_sum), "ACK+CLEARANCE for seq=%u: %.200s", hdr.seq_num, clearance);
+                log_packet("TO", "ACK", ack_hdr.seq_num, ack_hdr.payload_length, 0, log_sum);
+                last_send_ms = now_ms();
             }
             break;
         }
@@ -317,6 +420,7 @@ static void handle_client(SOCKET client_fd) {
             if (state != STATE_TAKEOFF && state != STATE_TRANSIT &&
                 state != STATE_LANDING && state != STATE_MAYDAY) {
                 send_error_pkt(client_fd, "MAYDAY packet not valid in current state", aircraft_id);
+                last_send_ms = now_ms();
                 break;
             }
             printf("\n!!! [MAYDAY] PKT_MAYDAY received from %s !!!\n\n", aircraft_id);
@@ -328,6 +432,7 @@ static void handle_client(SOCKET client_fd) {
                 display_session_status(aircraft_id, state);
             }
             send_ack(client_fd, hdr.seq_num, aircraft_id);
+            last_send_ms = now_ms();
             break;
         }
 
@@ -337,6 +442,7 @@ static void handle_client(SOCKET client_fd) {
             log_info("Processing large weather data request");
             send_ack(client_fd, hdr.seq_num, aircraft_id);
             send_large_data(client_fd, aircraft_id);
+            last_send_ms = now_ms();
             break;
         }
 
@@ -346,6 +452,7 @@ static void handle_client(SOCKET client_fd) {
                    hdr.origin_atc_id, aircraft_id);
             log_info("Handoff notification acknowledged");
             send_ack(client_fd, hdr.seq_num, aircraft_id);
+            last_send_ms = now_ms();
             break;
         }
 
@@ -368,12 +475,18 @@ static void handle_client(SOCKET client_fd) {
             free(payload); goto session_end;
         }
 
+        /* ---- ACK / Heartbeat from client — do NOT reset last_send_ms ---- */
+        case PKT_ACK: {
+            break;
+        }
+
         /* REQ-STM-030: Reject unhandled / out-of-state packets. */
         default: {
             char err[128];
             snprintf(err, sizeof(err), "Packet type %s (0x%02X) not handled in state %s",
                      type_str, hdr.packet_type, state_to_str(state));
             send_error_pkt(client_fd, err, aircraft_id);
+            last_send_ms = now_ms();
             break;
         }
         }
