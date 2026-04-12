@@ -86,4 +86,21 @@ mod tests {
         let result = Connection::connect("127.0.0.1:19999");
         assert!(result.is_err());
     }
+
+    /// CLT-012
+    ///REQ-CLT-080
+    ///DO-178C DAL-D — safety-critical software must never panic on connection failure
+    ///Verifies Connection::connect returns Err and never panics on unreachable address.Uses catch_unwind to detect any panic.
+    /// @pass  No panic occurs and result is Err
+    #[test]
+    fn test_clt012_connection_error_not_panic() {
+        let outcome = std::panic::catch_unwind(|| {
+            Connection::connect("127.0.0.1:19999")
+        });
+        assert!(outcome.is_ok(),
+            "Connection::connect must not panic on failure");
+        let result = outcome.unwrap();
+        assert!(result.is_err(),
+            "Connection::connect must return Err on unreachable address");
+    }
 }
