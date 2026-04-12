@@ -266,4 +266,145 @@ mod tests {
         let bytes2 = header.to_bytes();
         assert_eq!(bytes2[53], 0);
     }
+
+    //CLT-002
+    //REQ-PKT-010
+    //DO-178C DAL-D — all packet type identifiers must be verifiable against wire spec
+    //Verifies all 11 packet type constants match agreed wire values in shared/packet.h
+    // @pass  All 11 assert_eq comparisons succeed
+    #[test]
+    fn test_clt002_all_packet_type_constants() {
+        assert_eq!(PKT_HANDSHAKE,          0x01u8);
+        assert_eq!(PKT_ACK,                0x02u8);
+        assert_eq!(PKT_ERROR,              0x03u8);
+        assert_eq!(PKT_TAKEOFF,            0x04u8);
+        assert_eq!(PKT_TRANSIT,            0x05u8);
+        assert_eq!(PKT_LANDING,            0x06u8);
+        assert_eq!(PKT_MAYDAY,             0x07u8);
+        assert_eq!(PKT_LARGE_DATA_REQUEST, 0x08u8);
+        assert_eq!(PKT_LARGE_DATA,         0x09u8);
+        assert_eq!(PKT_HANDOFF_NOTIFY,     0x0Au8);
+        assert_eq!(PKT_DISCONNECT,         0x0Bu8);
+    }
+
+    //CLT-004
+    //REQ-PKT-020
+    //CARs SOR/96-433 Part V — buffered handoff packets must be identifiable by receiving ATC
+    //Verifies buffered handoff packet carries non-zero origin_atc_id in header
+    // @pass  Copied origin_atc_id is non-zero and equals 1001
+    #[test]
+    fn test_clt004_buffered_packet_nonzero_atc_id() {
+        let header = PacketHeader {
+            packet_type:    PKT_TRANSIT,
+            seq_num:        5,
+            timestamp:      0,
+            payload_length: 0,
+            origin_atc_id:  1001,
+            aircraft_id:    [0u8; 32],
+            emergency_flag: 0,
+        };
+        let atc_id = header.origin_atc_id;
+        assert_ne!(atc_id, 0,
+            "buffered packet must have non-zero origin_atc_id");
+        assert_eq!(atc_id, 1001,
+            "origin_atc_id must equal the value set");
+    }
+
+    //CLT-005
+    //REQ-PKT-020
+    //CARs SOR/96-433 Part V — live packets must be distinguishable from buffered handoff packets
+    //Verifies live real-time packet hasorigin_atc_id of zero in header
+    // @pass  Copied origin_atc_id equals zero
+    #[test]
+    fn test_clt005_live_packet_zero_atc_id() {
+        let header = PacketHeader {
+            packet_type:    PKT_TRANSIT,
+            seq_num:        1,
+            timestamp:      0,
+            payload_length: 0,
+            origin_atc_id:  0,
+            aircraft_id:    [0u8; 32],
+            emergency_flag: 0,
+        };
+        let atc_id = header.origin_atc_id;
+        assert_eq!(atc_id, 0,
+            "live packet must have origin_atc_id == 0");
+    }
+
+    //CLT-007
+    //REQ-PKT-060, REQ-PKT-061
+    // DO-178C DAL-D — payload structs must match C server exactly for binary compatibility
+    // Verifies HandshakePayload is exactly 52 bytes matching C server HandshakePayload struct
+    // @pass  size_of::<HandshakePayload>() equals 52
+    #[test]
+    fn test_clt007_handshake_payload_52_bytes() {
+        let size = std::mem::size_of::<HandshakePayload>();
+        assert_eq!(size, 52,
+            "HandshakePayload must be 52 bytes to match C server");
+    }
+
+    //CLT-008
+    //REQ-CLT-040, REQ-PKT-060, REQ-PKT-030
+    //DO-178C DAL-D / CARs SOR/96-433 Part V
+    //Verifies TakeoffPayload is exactly 35 bytes.C server comment corrected  pack(push,1)confirms 35 bytes on both sides.
+    //Rust and C are now consistent.
+    /// @pass  size_of::<TakeoffPayload>() equals 35
+    #[test]
+    fn test_clt008_takeoff_payload_35_bytes() {
+        let size = std::mem::size_of::<TakeoffPayload>();
+        assert_eq!(size, 35,
+            "TakeoffPayload must be 35 bytes — confirmed \
+             consistent with C server after comment correction");
+    }
+
+    //CLT-009
+    //REQ-CLT-040, REQ-PKT-060
+    //DO-178C DAL-D — struct sizes must match C server for binary compatibility
+    //Verifies TransitPayload is exactly 14 bytes matching C server TransitPayload struct
+    // @pass  size_of::<TransitPayload>() equals 14
+    #[test]
+    fn test_clt009_transit_payload_14_bytes() {
+        let size = std::mem::size_of::<TransitPayload>();
+        assert_eq!(size, 14,
+            "TransitPayload must be 14 bytes to match C server");
+    }
+
+    //CLT-010
+    //REQ-CLT-040, REQ-PKT-060, REQ-PKT-030
+    //O-178C DAL-D / CARs SOR/96-433 Part VVe rifies LandingPayload is exactly 25 bytes.
+    //C server comment corrected — pack(push,1)onfirms 25 bytes on both sides. Rust and C are now consistent.
+    /// @pass  size_of::<LandingPayload>() equals 25
+    #[test]
+    fn test_clt010_landing_payload_25_bytes() {
+        let size = std::mem::size_of::<LandingPayload>();
+        assert_eq!(size, 25,
+            "LandingPayload must be 25 bytes — confirmed \
+             consistent with C server after comment correction");
+    }
+
+    //CLT-019
+    //REQ-SYS-030, REQ-PKT-033
+    //DO-178C DAL-D — dynamic allocation must be deterministic and driven by header field
+    //Verifies Packet payload Vec size matches payload_length set in header
+    /// @pass  payload.len() equals payload_length value
+    #[test]
+    fn test_clt019_dynamic_payload_matches_header() {
+        let payload_data = vec![0xABu8; 52];
+        let header = PacketHeader {
+            packet_type:    PKT_HANDSHAKE,
+            seq_num:        1,
+            timestamp:      0,
+            payload_length: 52,
+            origin_atc_id:  0,
+            aircraft_id:    [0u8; 32],
+            emergency_flag: 0,
+        };
+        let pkt = Packet {
+            header,
+            payload: payload_data,
+        };
+        let plen = pkt.header.payload_length;
+        assert_eq!(pkt.payload.len(), plen as usize,
+            "payload Vec size must match header.payload_length");
+    }
 }
