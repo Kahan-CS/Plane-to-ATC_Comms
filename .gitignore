@@ -2,6 +2,7 @@
 *.o
 *.out
 a.out
+server/tests/*.exe
 
 # Rust build output
 client/target/
