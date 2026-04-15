@@ -5,3 +5,6 @@
 *.log
 tests/*.exe
 tests/*.log
+*.gcno
+*.gcda
+coverage_report/
