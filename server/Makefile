@@ -10,7 +10,7 @@ TEST_SRCS = $(wildcard tests/*.c)
 .PHONY: build test clean
 
 build:
-	$(CC) $(CFLAGS) $(INCLUDES) $(SRC) -o $(BIN)
+	$(CC) $(CFLAGS) $(INCLUDES) $(SRC) -o $(BIN) -lws2_32
 
 test:
 ifeq ($(TEST_SRCS),)
@@ -21,6 +21,11 @@ else
 		$(CC) $(CFLAGS) $(INCLUDES) $$t -o $$bin && ./$$bin; \
 	done
 endif
+
+integration:
+	@echo "Starting server in background..."
+	@echo "Run: python -m pytest integration_tests/ -v"
+	@echo "Make sure atc-server.exe is running on port 9000"
 
 clean:
 	rm -f $(BIN) *.o tests/*.o

@@ -9,7 +9,7 @@
 ///
 /// Regulatory compliance:
 ///   - CARs SOR/96-433 Part V — no data loss during ATC boundary crossing
-///   - DO-178C DAL-D — deterministic retransmission, full audit trail
+///   - DO-178C DAL-D:deterministic retransmission, full audit trail
 ///
 /// REQ-CLT-060, REQ-SYS-090, REQ-PKT-020, REQ-COM-040
 
@@ -104,11 +104,12 @@ mod tests {
         }
     }
 
-// test  CLT-013
-    // req   REQ-SYS-090, REQ-CLT-060
-    //   DO-178C DAL-D — buffer behaviour must bedeterministic for safety-critical handoff
-    // Verifies HandoffBuffer stores packets on push and returns all on drain
-    // @pass  drained.len() equals number of pushes
+    // CLT-013
+    // REQ-SYS-090, REQ-CLT-060
+    // DO-178C DAL-D: buffer behaviour must be
+    //   deterministic for safety-critical handoff
+    // Verifies HandoffBuffer push and drain returns all packets
+    // drained.len() equals number of packets pushed
     #[test]
     fn test_clt013_buffer_push_and_drain() {
         let mut buf = HandoffBuffer::new(1);
@@ -121,10 +122,11 @@ mod tests {
     }
 
     // CLT-014
-    //REQ-SYS-090, REQ-CLT-060
-    // DO-178C DAL-D — empty state must be deterministic after drain
-    //Verifies HandoffBuffer is empty after drain
-    // @pass  is_empty() returns true after drain
+    // REQ-SYS-090, REQ-CLT-060
+    // DO-178C DAL-D: empty state must be deterministic
+    //   after drain completes
+    // Verifies HandoffBuffer reports empty after drain
+    // is_empty() returns true after drain
     #[test]
     fn test_clt014_buffer_empty_after_drain() {
         let mut buf = HandoffBuffer::new(1);
@@ -134,11 +136,12 @@ mod tests {
             "buffer must be empty after drain");
     }
 
-    //CLT-015
-    //REQ-SYS-090, REQ-CLT-060
-    //DO-178C DAL-D — length must be traceable
-    //Verifies len() increments with each push
-    // @pass  len() equals push count at each step
+    // CLT-015
+    // REQ-SYS-090, REQ-CLT-060
+    // DO-178C DAL-D: buffer length must be traceable
+    //   and increment deterministically
+    // Verifies len() increments by 1 after each push
+    // len() equals push count at each step
     #[test]
     fn test_clt015_buffer_len_after_push() {
         let mut buf = HandoffBuffer::new(1);
@@ -148,5 +151,36 @@ mod tests {
         buf.push(make_packet(3)); assert_eq!(buf.len(), 3);
         buf.push(make_packet(4)); assert_eq!(buf.len(), 4);
         buf.push(make_packet(5)); assert_eq!(buf.len(), 5);
+    }
+
+    // CLT-024
+    // REQ-CLT-060, REQ-PKT-020
+    // CARs SOR/96-433 Part V: buffered handoff packets must retain their originating ATC identifier so the new server can distinguish them from
+    //   live real-time packets
+    // Verifies HandoffBuffer retains origin_atc_id
+    //   value through push and drain cycle
+    // Drained packet origin_atc_id equals 1001
+    #[test]
+    fn test_clt024_buffer_retains_atc_id() {
+        let mut buf = HandoffBuffer::new(1001);
+        let pkt = crate::packet::Packet {
+            header: crate::packet::PacketHeader {
+                packet_type:    crate::packet::PKT_TRANSIT,
+                seq_num:        7,
+                timestamp:      0,
+                payload_length: 0,
+                origin_atc_id:  1001,
+                aircraft_id:    [0u8; 32],
+                emergency_flag: 0,
+            },
+            payload: vec![],
+        };
+        buf.push(pkt);
+        let mut drained = buf.drain();
+        assert_eq!(drained.len(), 1,
+            "one packet should be drained");
+        let atc_id = drained.remove(0).header.origin_atc_id;
+        assert_eq!(atc_id, 1001,
+            "drained packet must retain origin_atc_id of 1001");
     }
 }

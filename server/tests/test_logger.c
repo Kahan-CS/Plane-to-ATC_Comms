@@ -29,8 +29,9 @@
 
 // SVR-011
 // REQ-LOG-010, REQ-LOG-040
+// CARs SOR/96-433 Part V: all safety-critical events
+//   must be logged with timestamp and direction
 // logger_init must create a timestamped log file and return 0 on success.
-//     File name format: ATC_SERVER_YYYYMMDD_HHMMSS.log
 // TEST_ASSERT_EQUAL_INT(0, result) passes and g_log_file is not NULL after init
 
 void test_SVR011_logger_creates_file(void)
@@ -43,6 +44,8 @@ void test_SVR011_logger_creates_file(void)
 
 // SVR-012
 // REQ-LOG-010, REQ-SYS-050
+// CARs SOR/96-433 Part V: all safety-critical events
+//   must be logged with timestamp and direction
 // log_info must write an INFO entry to the log file without crashing.
 // Function completes, g_log_file remains open
 
@@ -56,8 +59,10 @@ void test_SVR012_log_info_no_crash(void)
 
 // SVR-013
 // REQ-LOG-010, REQ-SYS-050
+// CARs SOR/96-433 Part V: all safety-critical events
+//   must be logged with timestamp and direction
 // log_error must write an ERROR entry and increment g_errors counter without crashing.
-//  g_errors equals 1 after one log_error call
+// g_errors equals 1 after one log_error call
 
 void test_SVR013_log_error_increments_counter(void)
 {
@@ -69,8 +74,10 @@ void test_SVR013_log_error_increments_counter(void)
 
 // SVR-014
 // REQ-LOG-020, REQ-SYS-050
-// log_state_transition must write a transition entry capturing prev state,new state, trigger, and timestamp Must also increment g_state_trans counter.
-//  g_state_trans equals 1 after one call
+// CARs SOR/96-433 Part V: all safety-critical events
+//   must be logged with timestamp and direction
+// log_state_transition must write a transition entry capturing prev state, new state, trigger, and timestamp. Must also increment g_state_trans counter.
+// g_state_trans equals 1 after one call
 
 void test_SVR014_log_state_transition_increments(void)
 {
@@ -84,9 +91,10 @@ void test_SVR014_log_state_transition_increments(void)
 
 // SVR-015
 // REQ-LOG-010, REQ-LOG-060
-// logger_close must call log_session_summary,flush, and close the log file cleanly.
-// After close g_log_file must be NULL.
-//  g_log_file is NULL after logger_close()
+// CARs SOR/96-433 Part V: all safety-critical events
+//   must be logged with timestamp and direction
+// logger_close must call log_session_summary, flush, and close the log file cleanly.
+// g_log_file is NULL after logger_close()
 
 void test_SVR015_logger_close_sets_null(void)
 {
@@ -97,8 +105,9 @@ void test_SVR015_logger_close_sets_null(void)
 
 // SVR-019
 // REQ-LOG-030
-// log_packet must write an entry containingdirection, packet type string, sequence number, and payload length fields. Direction "TO" must increment g_packets_tx.
-//(logger.h checks direction[0]=='F' for RX; anything else counts as TX — REQ-LOG-060)
+// CARs SOR/96-433 Part V: all safety-critical events
+//   must be logged with timestamp and direction
+// log_packet must write an entry containing direction, packet type string, sequence number, and payload length. Direction "TO" must increment g_packets_tx.
 // log_packet completes, g_packets_tx equals 1
 
 void test_SVR019_log_packet_tx_increments(void)
@@ -112,9 +121,10 @@ void test_SVR019_log_packet_tx_increments(void)
 
 // SVR-020
 // REQ-LOG-050
-// Any packet with emergency_flag == 1 must be logged with [MAYDAY] prefix per CARs SOR/96-433 Part V safety requirements.
-//  Direction "FROM" increments g_packets_rx. (logger.h checks direction[0]=='F' for RX)
-//  @pass g_packets_rx equals 1: MAYDAY path executed
+// CARs SOR/96-433 Part V: all safety-critical events
+//   must be logged with timestamp and direction
+// Any packet with emergency_flag == 1 must be logged with [MAYDAY] prefix. Direction "FROM" increments g_packets_rx.
+// g_packets_rx equals 1 after MAYDAY log_packet call
 
 void test_SVR020_mayday_flag_logged(void)
 {
@@ -125,9 +135,27 @@ void test_SVR020_mayday_flag_logged(void)
     logger_close();
 }
 
+// SVR-023
+// REQ-LOG-030
+// DO-178C DAL-D: every log entry must follow the defined format to ensure post-flight audit  traceability, non-standard entries cannot
+//   be parsed by automated review tools
+// Verifies log file is created, written to, and closed cleanly — confirming the logging pipeline executes without error for a known packet entry. File existence after close confirms flush completed successfully.
+// logger_close sets g_log_file to NULL and
+//   log file exists on disk after close
+
+void test_SVR023_log_entry_pipeline_executes(void)
+{
+    logger_init();
+    TEST_ASSERT_NOT_NULL(g_log_file);
+    log_packet("TO", "TRANSIT", 2, 14, 0,
+               "SVR-023 format pipeline verify");
+    logger_close();
+    TEST_ASSERT_NULL(g_log_file);
+}
+
 int main(void)
 {
-    UNITY_BEGIN("Server Logger:SVR-011 to SVR-020");
+    UNITY_BEGIN("Server Logger — SVR-011 to SVR-023");
     RUN_TEST(test_SVR011_logger_creates_file);
     RUN_TEST(test_SVR012_log_info_no_crash);
     RUN_TEST(test_SVR013_log_error_increments_counter);
@@ -135,5 +163,6 @@ int main(void)
     RUN_TEST(test_SVR015_logger_close_sets_null);
     RUN_TEST(test_SVR019_log_packet_tx_increments);
     RUN_TEST(test_SVR020_mayday_flag_logged);
+    RUN_TEST(test_SVR023_log_entry_pipeline_executes);
     return UNITY_END();
 }

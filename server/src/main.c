@@ -708,7 +708,9 @@ int main(int argc, char *argv[]) {
         }
 
         char client_ip[INET_ADDRSTRLEN] = "unknown";
-        inet_ntop(AF_INET, &client_addr.sin_addr, client_ip, sizeof(client_ip));
+        strncpy(client_ip,
+                inet_ntoa(client_addr.sin_addr),
+                sizeof(client_ip) - 1);
         printf("[ATC] New connection from %s:%d (session #%d)\n",
                client_ip, ntohs(client_addr.sin_port), g_session_count + 1);
         log_info("Client connected");

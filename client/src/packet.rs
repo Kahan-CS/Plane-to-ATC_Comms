@@ -210,11 +210,23 @@ impl LandingPayload {
 mod tests {
     use super::*;
 
+    // CLT-001
+    // REQ-PKT-031
+    // DO-178C DAL-D: packed struct must have no hidden
+    //   compiler padding — size must be deterministic
+    // Verifies PacketHeader is exactly 54 bytes
+    // size_of::<PacketHeader>() equals 54
     #[test]
     fn header_is_54_bytes() {
         assert_eq!(std::mem::size_of::<PacketHeader>(), 54);
     }
 
+    // CLT-006
+    // REQ-PKT-030, REQ-SYS-020
+    // DO-178C DAL-D: serialization round-trip must
+    //   produce identical values — no data corruption
+    // Verifies to_bytes then from_bytes restores all fields
+    // All field values match after round-trip
     #[test]
     fn header_round_trips() {
         let original = PacketHeader {
@@ -255,6 +267,12 @@ mod tests {
         assert_eq!(dec_flag, orig_flag);
     }
 
+    // CLT-003
+    // REQ-PKT-034
+    // CARs SOR/96-433 Part V: MAYDAY flag must be
+    //   readable before payload deserialization
+    // Verifies emergency_flag is at byte offset 53
+    // bytes[53] equals 1 when flag is set
     #[test]
     fn emergency_flag_detectable_in_header() {
         // REQ-PKT-034: emergency_flag readable without deserializing payload
@@ -275,11 +293,12 @@ mod tests {
         assert_eq!(bytes2[53], 0);
     }
 
-    //CLT-002
-    //REQ-PKT-010
-    //DO-178C DAL-D — all packet type identifiers must be verifiable against wire spec
-    //Verifies all 11 packet type constants match agreed wire values in shared/packet.h
-    // @pass  All 11 assert_eq comparisons succeed
+    // CLT-002
+    // REQ-PKT-010
+    // DO-178C DAL-D: all packet type identifiers must
+    //   match agreed wire values for interoperability
+    // Verifies all 11 constants match shared/packet.h
+    // All 11 assert_eq comparisons succeed
     #[test]
     fn test_clt002_all_packet_type_constants() {
         assert_eq!(PKT_HANDSHAKE,          0x01u8);
@@ -295,11 +314,12 @@ mod tests {
         assert_eq!(PKT_DISCONNECT,         0x0Bu8);
     }
 
-    //CLT-004
-    //REQ-PKT-020
-    //CARs SOR/96-433 Part V — buffered handoff packets must be identifiable by receiving ATC
-    //Verifies buffered handoff packet carries non-zero origin_atc_id in header
-    // @pass  Copied origin_atc_id is non-zero and equals 1001
+    // CLT-004
+    // REQ-PKT-020
+    // CARs SOR/96-433 Part V: buffered handoff packets
+    //   must carry non-zero ATC origin identifier
+    // Verifies origin_atc_id is non-zero for buffered packet
+    // Copied origin_atc_id is non-zero and equals 1001
     #[test]
     fn test_clt004_buffered_packet_nonzero_atc_id() {
         let header = PacketHeader {
@@ -318,11 +338,12 @@ mod tests {
             "origin_atc_id must equal the value set");
     }
 
-    //CLT-005
-    //REQ-PKT-020
-    //CARs SOR/96-433 Part V — live packets must be distinguishable from buffered handoff packets
-    //Verifies live real-time packet hasorigin_atc_id of zero in header
-    // @pass  Copied origin_atc_id equals zero
+    // CLT-005
+    // REQ-PKT-020
+    // CARs SOR/96-433 Part V: live packets must be
+    //   distinguishable from buffered handoff packets
+    // Verifies live packet has origin_atc_id of zero
+    // Copied origin_atc_id equals zero
     #[test]
     fn test_clt005_live_packet_zero_atc_id() {
         let header = PacketHeader {
@@ -339,11 +360,12 @@ mod tests {
             "live packet must have origin_atc_id == 0");
     }
 
-    //CLT-007
-    //REQ-PKT-060, REQ-PKT-061
-    // DO-178C DAL-D — payload structs must match C server exactly for binary compatibility
-    // Verifies HandshakePayload is exactly 52 bytes matching C server HandshakePayload struct
-    // @pass  size_of::<HandshakePayload>() equals 52
+    // CLT-007
+    // REQ-PKT-060, REQ-PKT-061
+    // DO-178C DAL-D: payload structs must match C server
+    //   exactly for binary compatibility
+    // Verifies HandshakePayload is exactly 52 bytes
+    // size_of::<HandshakePayload>() equals 52
     #[test]
     fn test_clt007_handshake_payload_52_bytes() {
         let size = std::mem::size_of::<HandshakePayload>();
@@ -351,12 +373,12 @@ mod tests {
             "HandshakePayload must be 52 bytes to match C server");
     }
 
-    //CLT-008
-    //REQ-CLT-040, REQ-PKT-060, REQ-PKT-030
-    //DO-178C DAL-D / CARs SOR/96-433 Part V
-    //Verifies TakeoffPayload is exactly 35 bytes.C server comment corrected  pack(push,1)confirms 35 bytes on both sides.
-    //Rust and C are now consistent.
-    /// @pass  size_of::<TakeoffPayload>() equals 35
+    // CLT-008
+    // REQ-CLT-040, REQ-PKT-060
+    // DO-178C DAL-D: takeoff telemetry struct must be
+    //   binary-compatible with C server struct
+    // Verifies TakeoffPayload is exactly 35 bytes
+    // size_of::<TakeoffPayload>() equals 35
     #[test]
     fn test_clt008_takeoff_payload_35_bytes() {
         let size = std::mem::size_of::<TakeoffPayload>();
@@ -365,11 +387,12 @@ mod tests {
              consistent with C server after comment correction");
     }
 
-    //CLT-009
-    //REQ-CLT-040, REQ-PKT-060
-    //DO-178C DAL-D — struct sizes must match C server for binary compatibility
-    //Verifies TransitPayload is exactly 14 bytes matching C server TransitPayload struct
-    // @pass  size_of::<TransitPayload>() equals 14
+    // CLT-009
+    // REQ-CLT-040, REQ-PKT-060
+    // DO-178C DAL-D: transit telemetry struct must be
+    //   binary-compatible with C server struct
+    // Verifies TransitPayload is exactly 14 bytes
+    // size_of::<TransitPayload>() equals 14
     #[test]
     fn test_clt009_transit_payload_14_bytes() {
         let size = std::mem::size_of::<TransitPayload>();
@@ -377,11 +400,12 @@ mod tests {
             "TransitPayload must be 14 bytes to match C server");
     }
 
-    //CLT-010
-    //REQ-CLT-040, REQ-PKT-060, REQ-PKT-030
-    //O-178C DAL-D / CARs SOR/96-433 Part VVe rifies LandingPayload is exactly 25 bytes.
-    //C server comment corrected — pack(push,1)onfirms 25 bytes on both sides. Rust and C are now consistent.
-    /// @pass  size_of::<LandingPayload>() equals 25
+    // CLT-010
+    // REQ-CLT-040, REQ-PKT-060
+    // DO-178C DAL-D: landing telemetry struct must be
+    //   binary-compatible with C server struct
+    // Verifies LandingPayload is exactly 25 bytes
+    // size_of::<LandingPayload>() equals 25
     #[test]
     fn test_clt010_landing_payload_25_bytes() {
         let size = std::mem::size_of::<LandingPayload>();
@@ -390,11 +414,12 @@ mod tests {
              consistent with C server after comment correction");
     }
 
-    //CLT-019
-    //REQ-SYS-030, REQ-PKT-033
-    //DO-178C DAL-D — dynamic allocation must be deterministic and driven by header field
-    //Verifies Packet payload Vec size matches payload_length set in header
-    /// @pass  payload.len() equals payload_length value
+    // CLT-019
+    // REQ-SYS-030, REQ-PKT-033
+    // DO-178C DAL-D: dynamic allocation must be driven
+    //   by header field value deterministically
+    // Verifies payload Vec size matches payload_length
+    // payload.len() equals header.payload_length
     #[test]
     fn test_clt019_dynamic_payload_matches_header() {
         let payload_data = vec![0xABu8; 52];
@@ -414,5 +439,73 @@ mod tests {
         let plen = pkt.header.payload_length;
         assert_eq!(pkt.payload.len(), plen as usize,
             "payload Vec size must match header.payload_length");
+    }
+
+    // CLT-020
+    // REQ-PKT-062, REQ-CLT-050
+    // CARs SOR/96-433 Part V: MAYDAY distress signal must be constructable and correctly encoded in any active flight phase
+    // Verifies building a MAYDAY packet correctly sets packet_type to PKT_MAYDAY and emergency_flag to 1
+    // Both field values confirmed via local variable copy
+    #[test]
+    fn test_clt020_mayday_packet_sets_emergency_flag() {
+        let header = PacketHeader {
+            packet_type:    PKT_MAYDAY,
+            seq_num:        1,
+            timestamp:      0,
+            payload_length: 0,
+            origin_atc_id:  0,
+            aircraft_id:    [0u8; 32],
+            emergency_flag: 1,
+        };
+        let ptype = header.packet_type;
+        let flag  = header.emergency_flag;
+        assert_eq!(ptype, PKT_MAYDAY,
+            "packet_type must be PKT_MAYDAY");
+        assert_eq!(flag, 1,
+            "emergency_flag must be 1 for MAYDAY");
+        assert_ne!(flag, 0,
+            "emergency_flag must be non-zero for MAYDAY");
+    }
+
+    // CLT-021
+    // REQ-PKT-061, REQ-CLT-030
+    // DO-178C DAL-D: aircraft identification data must\ be correctly serialized into handshake payload with no field corruption or offset error
+    // Verifies HandshakePayload::to_bytes() produces
+    //   52 bytes and callsign appears at offset 0
+    // bytes.len() == 52 and first 6 bytes match callsign
+    #[test]
+    fn test_clt021_handshake_payload_serializes_callsign() {
+        let mut p = HandshakePayload::default();
+        let callsign = b"AC1234";
+        p.callsign[..callsign.len()].copy_from_slice(callsign);
+        let bytes = p.to_bytes();
+        assert_eq!(bytes.len(), 52,
+            "HandshakePayload::to_bytes must produce 52 bytes");
+        assert_eq!(&bytes[0..6], callsign,
+            "callsign bytes must appear at offset 0 in payload");
+    }
+
+    // CLT-022
+    // REQ-CLT-040
+    // DO-178C DAL-D: serialized takeoff telemetry must produce the exact byte count expected by the C server, size mismatch causes misread telemetry
+    // Verifies TakeoffPayload::to_bytes() output is exactly 35 bytes tests serialization not just
+    //   compile-time struct size
+    // bytes.len() equals 35
+    #[test]
+    fn test_clt022_takeoff_payload_serializes_35_bytes() {
+        let p = TakeoffPayload {
+            departure_time:     0,
+            clearance_type:     0,
+            assigned_heading:   0.0,
+            assigned_altitude:  0.0,
+            squawk_code:        0,
+            wind_speed:         0.0,
+            wind_direction:     0.0,
+            speed_off_runway:   0.0,
+            initial_climb_rate: 0.0,
+        };
+        let bytes = p.to_bytes();
+        assert_eq!(bytes.len(), 35,
+            "TakeoffPayload::to_bytes must produce 35 bytes");
     }
 }

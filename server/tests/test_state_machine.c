@@ -30,6 +30,7 @@
 
 // SVR-001
 // REQ-STM-010
+// CARs SOR/96-433 Part V: state machine must be  deterministic in safety-critical ATC software
 // Initial ATCState variable must equal STATE_IDLE before any transition is triggered.
 // TEST_ASSERT_EQUAL_INT confirms value is STATE_IDLE
 
@@ -41,6 +42,7 @@ void test_SVR001_initial_state_is_idle(void)
 
 // SVR-002
 // REQ-STM-020
+// CARs SOR/96-433 Part V: state machine must be deterministic in safety-critical ATC software
 // IDLE -> HANDSHAKE must be a permitted transition. This is the first required step when a client connects.
 // is_valid_transition returns 1
 
@@ -49,8 +51,9 @@ void test_SVR002_idle_to_handshake_valid(void)
     TEST_ASSERT_EQUAL_INT(1, is_valid_transition(STATE_IDLE, STATE_HANDSHAKE));
 }
 
-// VR-003
+// SVR-003
 // REQ-STM-020
+// CARs SOR/96-433 Part V: state machine must be deterministic in safety-critical ATC software
 // HANDSHAKE -> TAKEOFF must be a permitted transition. Occurs after the server verifies the handshake packet.
 // is_valid_transition returns 1
 
@@ -61,6 +64,7 @@ void test_SVR003_handshake_to_takeoff_valid(void)
 
 // SVR-004
 // REQ-STM-020
+// CARs SOR/96-433 Part V: state machine must be deterministic in safety-critical ATC software
 // TAKEOFF -> TRANSIT must be a permitted transition. Occurs when the aircraft reports airborne telemetry.
 // is_valid_transition returns 1
 
@@ -71,6 +75,7 @@ void test_SVR004_takeoff_to_transit_valid(void)
 
 // SVR-005
 // REQ-STM-020
+// CARs SOR/96-433 Part V: state machine must be deterministic in safety-critical ATC software
 // TRANSIT -> LANDING must be a permitted transition. Occurs when the aircraft begins approach phase.
 // is_valid_transition returns 1
 
@@ -81,6 +86,7 @@ void test_SVR005_transit_to_landing_valid(void)
 
 // SVR-006
 // REQ-STM-020
+// CARs SOR/96-433 Part V: state machine must be deterministic in safety-critical ATC software
 // LANDING -> DISCONNECTED must be a permitted transition. Occurs when the session ends after landing.
 // is_valid_transition returns 1
 
@@ -91,7 +97,9 @@ void test_SVR006_landing_to_disconnected_valid(void)
 
 // SVR-007
 // REQ-STM-020
-//  DISCONNECTED -> IDLE must be a permitted transition. Resets the server to accept a new client connection.
+// CARs SOR/96-433 Part V: state machine must be
+//   deterministic in safety-critical ATC software
+// DISCONNECTED -> IDLE must be a permitted transition. Resets the server to accept a new client connection.
 // is_valid_transition returns 1
 
 void test_SVR007_disconnected_to_idle_valid(void)
@@ -101,8 +109,10 @@ void test_SVR007_disconnected_to_idle_valid(void)
 
 // SVR-008
 // REQ-STM-020
+// CARs SOR/96-433 Part V: state machine must be
+//   deterministic in safety-critical ATC software
 // IDLE -> TAKEOFF must be rejected (skips HANDSHAKE). No state may be skipped; transitions must be sequential.
-//  is_valid_transition returns 0
+// is_valid_transition returns 0
 
 void test_SVR008_skip_state_rejected(void)
 {
@@ -111,8 +121,10 @@ void test_SVR008_skip_state_rejected(void)
 
 // SVR-009
 // REQ-STM-020
-// TRANSIT -> HANDSHAKE must be rejected (backwards transition).The state machine must never move backwards.
-//  is_valid_transition returns 0
+// CARs SOR/96-433 Part V: state machine must be
+//   deterministic in safety-critical ATC software
+// TRANSIT -> HANDSHAKE must be rejected (backwards transition). The state machine must never move backwards.
+// is_valid_transition returns 0
 
 void test_SVR009_backwards_transition_rejected(void)
 {
@@ -121,6 +133,8 @@ void test_SVR009_backwards_transition_rejected(void)
 
 // SVR-010
 // REQ-STM-010
+// CARs SOR/96-433 Part V: state machine must be
+//   deterministic in safety-critical ATC software
 // state_to_str must return the correct string label for all 6 defined states. Used in log output and debug messages.
 // TEST_ASSERT_EQUAL_STRING confirms each label matches exactly
 
@@ -134,9 +148,25 @@ void test_SVR010_state_to_str_all_states(void)
     TEST_ASSERT_EQUAL_STRING("DISCONNECTED", state_to_str(STATE_DISCONNECTED));
 }
 
+// SVR-021
+// REQ-STM-040
+// CARs SOR/96-433 Part V: MAYDAY emergency state must be reachable from any active flight phase without requiring intermediate state transitions
+// Verifies is_valid_transition returns 1 for TAKEOFF->MAYDAY, TRANSIT->MAYDAY, LANDING->MAYDAY
+// All three transitions return 1
+
+void test_SVR021_mayday_reachable_from_active_phases(void)
+{
+    TEST_ASSERT_EQUAL_INT(1,
+                          is_valid_transition(STATE_TAKEOFF, STATE_MAYDAY));
+    TEST_ASSERT_EQUAL_INT(1,
+                          is_valid_transition(STATE_TRANSIT, STATE_MAYDAY));
+    TEST_ASSERT_EQUAL_INT(1,
+                          is_valid_transition(STATE_LANDING, STATE_MAYDAY));
+}
+
 int main(void)
 {
-    UNITY_BEGIN("Server State Machine — SVR-001 to SVR-010");
+    UNITY_BEGIN("Server State Machine — SVR-001 to SVR-021");
     RUN_TEST(test_SVR001_initial_state_is_idle);
     RUN_TEST(test_SVR002_idle_to_handshake_valid);
     RUN_TEST(test_SVR003_handshake_to_takeoff_valid);
@@ -147,5 +177,6 @@ int main(void)
     RUN_TEST(test_SVR008_skip_state_rejected);
     RUN_TEST(test_SVR009_backwards_transition_rejected);
     RUN_TEST(test_SVR010_state_to_str_all_states);
+    RUN_TEST(test_SVR021_mayday_reachable_from_active_phases);
     return UNITY_END();
 }

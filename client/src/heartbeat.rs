@@ -12,7 +12,7 @@
 /// Regulatory compliance:
 ///   - CARs SOR/96-433 Part VI s.602.137 - communication watchdog for
 ///     safety-critical ATC links; loss of link must be detected and reported
-///   - DO-178C DAL-D - independent monitoring thread with its own audit trail
+///   - DO-178C DAL-D:independent monitoring thread with its own audit trail
 ///
 /// REQ-CLT-080, REQ-COM-020
 use std::fs::{File, OpenOptions};
@@ -139,4 +139,20 @@ fn send_keepalive(stream: &mut TcpStream, pkt: &Packet) -> std::io::Result<()> {
     use std::io::Write;
     stream.write_all(&pkt.header.to_bytes())?;
     stream.flush()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // CLT-023
+    // REQ-COM-030
+    // DO-178C DAL-D: keepalive timing must be a  defined deterministic constant, undefined or zero interval causes undetected connection loss in safety-critical communications
+    // Verifies heartbeat interval constant is positive
+    // Constant value is greater than 0
+    #[test]
+    fn test_clt023_heartbeat_interval_is_positive() {
+        assert!(HEARTBEAT_INTERVAL_SECS > 0u64,
+            "HEARTBEAT_INTERVAL_SECS must be greater than 0");
+    }
 }

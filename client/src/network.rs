@@ -80,6 +80,12 @@ impl Connection {
 mod tests {
     use super::*;
 
+    // CLT-011
+    // REQ-COM-020, REQ-CLT-080
+    // DO-178C DAL-D: retry loop must terminate after
+    //   defined maximum attempts no infinite loops
+    // Verifies Connection::connect returns Err after 3 attempts
+    // result.is_err() is true on unreachable address
     #[test]
     fn connect_fails_after_max_retries() {
         // REQ-COM-020: terminal failure after MAX_RETRY_ATTEMPTS
@@ -87,11 +93,12 @@ mod tests {
         assert!(result.is_err());
     }
 
-    /// CLT-012
-    ///REQ-CLT-080
-    ///DO-178C DAL-D — safety-critical software must never panic on connection failure
-    ///Verifies Connection::connect returns Err and never panics on unreachable address.Uses catch_unwind to detect any panic.
-    /// @pass  No panic occurs and result is Err
+    // CLT-012
+    // REQ-CLT-080
+    // DO-178C DAL-D: safety-critical software must
+    //   never panic on connection failure
+    // Verifies connect returns Err and does not panic
+    // catch_unwind succeeds and result is Err
     #[test]
     fn test_clt012_connection_error_not_panic() {
         let outcome = std::panic::catch_unwind(|| {

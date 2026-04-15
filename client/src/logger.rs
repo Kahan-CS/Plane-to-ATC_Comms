@@ -119,6 +119,12 @@ impl Logger {
 mod tests {
     use super::*;
 
+    // CLT-016
+    // REQ-SYS-050, REQ-LOG-010
+    // DO-178C DAL-D: log file must be created at
+    //   startup and TX events must be recorded
+    // Verifies Logger creates file and TX counter increments
+    // tx_count equals 2 after HANDSHAKE and MAYDAY calls
     #[test]
     fn logger_creates_file_and_writes() {
         let logger = Logger::new("test_client").expect("logger init failed");
@@ -134,6 +140,12 @@ mod tests {
         assert_eq!(rx, 1); // ACK
     }
 
+    // CLT-016b
+    // REQ-LOG-050
+    // CARs SOR/96-433 Part V: MAYDAY events must be
+    //   logged with distinct prefix for audit traceability
+    // Verifies log_mayday increments tx_count by 1
+    // tx_count equals 1 after log_mayday call
     #[test]
     fn mayday_prefix_in_log_line() {
         // REQ-LOG-050: MAYDAY entries must be prefixed [MAYDAY]
