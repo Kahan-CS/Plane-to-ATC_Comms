@@ -26,6 +26,9 @@
 #include "server_config.h"
 #include "logger.h"
 
+/* Declared in main.c - runtime ATC identity */
+extern uint32_t g_atc_id;
+
 /* ---- Packet type -> string ------------------------------------- */
 
 static inline const char *packet_type_str(uint8_t type) {
@@ -148,7 +151,7 @@ static inline void build_header(PacketHeader *hdr, uint8_t type,
     hdr->seq_num        = g_server_seq++;
     hdr->timestamp      = now_ms();
     hdr->payload_length = payload_len;
-    hdr->origin_atc_id  = SERVER_ATC_ID;
+    hdr->origin_atc_id  = g_atc_id;
     hdr->emergency_flag = 0;
     if (aircraft_id) {
         strncpy(hdr->aircraft_id, aircraft_id, 31);

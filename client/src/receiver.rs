@@ -17,11 +17,12 @@
 use std::io::Read;
 use std::net::TcpStream;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 
 use crate::logger::Logger;
 use crate::packet::{
-    HEADER_SIZE, PKT_ACK, PKT_ERROR, PKT_HANDOFF_NOTIFY, PKT_LARGE_DATA, PacketHeader,
+    HEADER_SIZE, PHASE_LANDING, PHASE_TRANSIT, PKT_ACK, PKT_ERROR, PKT_HANDOFF_NOTIFY,
+    PKT_LARGE_DATA, PacketHeader,
 };
 
 /// Spawns the background receiver thread.
@@ -35,6 +36,7 @@ pub fn spawn_receiver(
     logger: Arc<Logger>,
     alive: Arc<AtomicBool>,
     handoff_flag: Arc<AtomicBool>,
+    phase_state: Arc<AtomicU8>,
 ) -> std::thread::JoinHandle<()> {
     std::thread::spawn(move || {
         loop {
@@ -60,6 +62,7 @@ pub fn spawn_receiver(
             let seq_num = header.seq_num;
             let payload_length = header.payload_length;
             let payload_len = payload_length as usize;
+            let mut should_reprint_prompt = false;
 
             // Read payload
             let mut payload = vec![0u8; payload_len];
@@ -74,27 +77,56 @@ pub fn spawn_receiver(
             // Dispatch by packet type
             match packet_type {
                 PKT_ACK => {
+                    let is_server_keepalive = payload_len == 0 && seq_num == 0;
+                    if is_server_keepalive {
+                        continue;
+                    }
+
                     if payload_len == 0 {
-                        // Plain ACK - sequence confirmation
+                        // Suppress plain ACK chatter in UI.
                         logger.log_rx("ACK", seq_num, 0, "server acknowledged packet");
-                        println!("\n[ATC] ACK received (seq={})", seq_num);
                     } else {
-                        // Non-empty payload = ATC clearance text (REQ-CLT-070, REQ-SVR-070)
-                        let text = String::from_utf8_lossy(&payload).to_string();
-                        logger.log_rx(
-                            "ACK/CLEARANCE",
-                            seq_num,
-                            payload_length,
-                            &text,
-                        );
-                        println!("\n--------------------------------------------------");
-                        println!("  [ATC CLEARANCE] {}", text);
-                        println!("--------------------------------------------------");
+                        let text = String::from_utf8_lossy(&payload).trim().to_string();
+                        let is_numeric_ack_payload = !text.is_empty()
+                            && text.chars().all(|c| c.is_ascii_digit());
+
+                        if is_numeric_ack_payload {
+                            // Server send_ack() includes acknowledged sequence as text.
+                            // This is not actionable for pilots, so keep it out of UI.
+                            logger.log_rx("ACK", seq_num, payload_length, &format!("ack_seq={}", text));
+                        } else {
+                            if text.contains("[DEPARTURE CLEARANCE]") {
+                                phase_state.store(PHASE_TRANSIT, Ordering::SeqCst);
+                                logger.log_connection(
+                                    "Departure clearance processed; phase advanced to TRANSIT",
+                                );
+                            }
+
+                            if text.contains("[LANDING CLEARANCE]") {
+                                if text.contains("NOT CLEARED") {
+                                    phase_state.store(PHASE_TRANSIT, Ordering::SeqCst);
+                                    logger.log_connection(
+                                        "Landing not cleared; phase reverted to TRANSIT",
+                                    );
+                                } else {
+                                    phase_state.store(PHASE_LANDING, Ordering::SeqCst);
+                                    logger.log_connection(
+                                        "Landing clearance processed; phase confirmed as LANDING",
+                                    );
+                                }
+                            }
+
+                            // Non-numeric ACK payload = ATC clearance text.
+                            logger.log_rx("ACK/CLEARANCE", seq_num, payload_length, &text);
+                            println!("\n+--------------------------------------------------+");
+                            println!("  [ATC CLEARANCE] {}", text);
+                            println!("+--------------------------------------------------+");
+                            should_reprint_prompt = true;
+                        }
                     }
                 }
 
                 PKT_LARGE_DATA => {
-                    // REQ-SYS-070: confirm large data received
                     logger.log_rx(
                         "LARGE_DATA",
                         seq_num,
@@ -102,16 +134,23 @@ pub fn spawn_receiver(
                         &format!("{} bytes received", payload_len),
                     );
                     println!(
-                        "\n[ATC] Weather data received: {} bytes ({:.2} KB)",
+                        "\n[ATC] Weather data received: {} bytes ({:.1} KB)",
                         payload_len,
                         payload_len as f64 / 1024.0
                     );
+                    let preview_len = payload_len.min(480);
+                    let preview = String::from_utf8_lossy(&payload[..preview_len]);
+                    println!("+------ WEATHER DATA (first {} chars) ------+", preview_len);
+                    println!("{}", preview);
+                    println!("+-------------------------------------------+");
+                    should_reprint_prompt = true;
                 }
 
                 PKT_ERROR => {
                     let msg = String::from_utf8_lossy(&payload).to_string();
                     logger.log_rx("ERROR", seq_num, payload_length, &msg);
                     println!("\n[!] ATC ERROR: {}", msg);
+                    should_reprint_prompt = true;
                 }
 
                 PKT_HANDOFF_NOTIFY => {
@@ -124,6 +163,7 @@ pub fn spawn_receiver(
                     );
                     println!("\n[ATC] Handoff notification received - prepare to reconnect.");
                     handoff_flag.store(true, Ordering::SeqCst);
+                    should_reprint_prompt = true;
                 }
 
                 other => {
@@ -136,10 +176,12 @@ pub fn spawn_receiver(
                 }
             }
 
-            // Re-print prompt so user knows they can still type
-            print!("Select option: ");
-            use std::io::Write;
-            std::io::stdout().flush().ok();
+            // Re-print only when receiver printed user-visible content.
+            if should_reprint_prompt {
+                print!("Select option: ");
+                use std::io::Write;
+                std::io::stdout().flush().ok();
+            }
         }
     })
 }

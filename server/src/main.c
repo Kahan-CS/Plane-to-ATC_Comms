@@ -56,6 +56,11 @@
 #include "include/state_machine.h"
 #include "include/network.h"
 
+/* Runtime ATC identity - set from command line.
+ * Usage: atc-server <PORT> [ATC_NAME] [ATC_ID] */
+char     g_atc_name[32] = "ATC-1";
+uint32_t g_atc_id       = 1;
+
 
 /* ================================================================
  *  Payload byte-order helpers
@@ -87,7 +92,17 @@ static inline int64_t swap_i64(int64_t v) {
 
 static int send_server_keepalive(SOCKET sockfd, const char *aircraft_id) {
     PacketHeader hdr;
-    build_header(&hdr, PKT_ACK, 0, aircraft_id);
+    memset(&hdr, 0, sizeof(PacketHeader));
+    hdr.packet_type = PKT_ACK;
+    hdr.seq_num = 0;                /* Reserved keepalive sequence */
+    hdr.timestamp = now_ms();
+    hdr.payload_length = 0;
+    hdr.origin_atc_id = g_atc_id;
+    hdr.emergency_flag = 0;
+    if (aircraft_id) {
+        strncpy(hdr.aircraft_id, aircraft_id, 31);
+        hdr.aircraft_id[31] = '\0';
+    }
     return send_packet(sockfd, &hdr, NULL);
 }
 
@@ -277,7 +292,29 @@ static void handle_client(SOCKET client_fd) {
             * auto-advancing on handshake success. */
             
             handshake_verified = 1;
-            printf("[ATC] Handshake VERIFIED. Awaiting TAKEOFF command from client.\n");
+
+            /* Determine which state to enter based on plane's declared phase.
+             * initial_phase==0 stays in HANDSHAKE; 2/3 support mid-flight reconnect. */
+            uint8_t initial_phase = 0;
+            if (payload && hdr.payload_length >= sizeof(HandshakePayload)) {
+                const HandshakePayload *hs = (const HandshakePayload *)payload;
+                initial_phase = hs->initial_phase;
+            }
+
+            if (initial_phase == 2) {
+                prev = state; state = STATE_TRANSIT;
+                log_state_transition(prev, state, "Handshake: initial_phase=TRANSIT");
+                printf("[ATC] State: %s -> %s (mid-flight reconnect)\n",
+                       state_to_str(prev), state_to_str(state));
+            } else if (initial_phase == 3) {
+                prev = state; state = STATE_LANDING;
+                log_state_transition(prev, state, "Handshake: initial_phase=LANDING");
+                printf("[ATC] State: %s -> %s (mid-flight reconnect)\n",
+                       state_to_str(prev), state_to_str(state));
+            } else {
+                printf("[ATC] Handshake VERIFIED. Waiting for takeoff.\n");
+            }
+
             display_session_status(aircraft_id, state);
             send_ack(client_fd, hdr.seq_num, aircraft_id);           //REQ-COM-060: ACK handshake packet to confirm receipt and verification
             //send_server_keepalive(client_fd, aircraft_id);
@@ -504,12 +541,12 @@ static void handle_client(SOCKET client_fd) {
 
         /* ---- HANDOFF NOTIFY (REQ-SVR-040) ---- */
         case PKT_HANDOFF_NOTIFY: {
-            printf("[ATC] Handoff notification from ATC #%u - aircraft: %s\n",
-                   hdr.origin_atc_id, aircraft_id);
-            log_info("Handoff notification acknowledged");
+            printf("[ATC] Handoff notification from %s - releasing session.\n", aircraft_id);
+            log_info("Handoff notification received - ending session to accept next client");
             send_ack(client_fd, hdr.seq_num, aircraft_id);
             last_send_ms = now_ms();
-            break;
+            free(payload);
+            goto session_end;
         }
 
         /* ---- DISCONNECT ---- */
@@ -570,11 +607,24 @@ session_end:
  * ================================================================ */
 
 int main(int argc, char *argv[]) {
-    if (argc < 2) { fprintf(stderr, "Usage: %s <PORT>\n", argv[0]); return 1; }
+    if (argc < 2) {
+        fprintf(stderr, "Usage: %s <PORT> [ATC_NAME] [ATC_ID]\n", argv[0]);
+        fprintf(stderr, "  e.g: %s 9000 CYYZ-NORTH 2\n", argv[0]);
+        return 1;
+    }
 
     int port = atoi(argv[1]);
     if (port <= 0 || port > 65535) {
         fprintf(stderr, "Invalid port: %s\n", argv[1]); return 1;
+    }
+
+    if (argc >= 3) {
+        strncpy(g_atc_name, argv[2], sizeof(g_atc_name) - 1);
+        g_atc_name[sizeof(g_atc_name) - 1] = '\0';
+    }
+    if (argc >= 4) {
+        int id = atoi(argv[3]);
+        if (id > 0) g_atc_id = (uint32_t)id;
     }
 
     WSADATA wsa;
@@ -586,10 +636,14 @@ int main(int argc, char *argv[]) {
     printf("\n========================================\n");
     printf("   ATC GROUND CONTROL SERVER\n");
     printf("   CSCN74000 - Group 3\n");
-    printf("   ATC ID: %u  |  Airport: %s\n", SERVER_ATC_ID, SERVER_AIRPORT_CODE);
+    printf("   ATC ID: %u  |  Name: %s\n", g_atc_id, g_atc_name);
     printf("========================================\n");
     printf("[ATC] Starting on port %d...\n\n", port);
-    log_info("Server starting");
+
+    char start_msg[96];
+    snprintf(start_msg, sizeof(start_msg), "Server starting - ID=%u Name=%s Port=%d",
+             g_atc_id, g_atc_name, port);
+    log_info(start_msg);
 
     SOCKET server_fd = socket(AF_INET, SOCK_STREAM, 0);
     if (server_fd == INVALID_SOCKET) {

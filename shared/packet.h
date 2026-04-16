@@ -64,7 +64,8 @@ typedef struct
     char aircraft_model[16]; /* e.g. "737-800" */
     char origin[4];          /* ICAO, e.g. "CYYZ" */
     char destination[4];     /* ICAO, e.g. "CAMD" */
-} HandshakePayload;          /* 52 bytes          */
+    uint8_t initial_phase;   /* 0=TAKEOFF(default), 2=TRANSIT, 3=LANDING */
+} HandshakePayload;          /* 53 bytes          */
 #pragma pack(pop)
 
 /* REQ-CLT-040: Takeoff telemetry payload */
@@ -80,7 +81,7 @@ typedef struct
     float wind_direction;     /* degrees */
     float speed_off_runway;   /* knots   */
     float initial_climb_rate; /* feet per minute  */
-} TakeoffPayload;             /* 41 bytes         */
+} TakeoffPayload;             /* Packed as 35 bytes due to 0x1 byte alignment         */
 #pragma pack(pop)
 
 /* REQ-CLT-040: Transit telemetry payload */
@@ -105,7 +106,7 @@ typedef struct
     uint8_t approach_clearance; /* 0=not cleared, 1=cleared */
     float wind_shear;           /* knots                 */
     float visibility;           /* statute miles         */
-} LandingPayload;               /* 27 bytes              */
+} LandingPayload;               /* Packed as 25 bytes due to 0x1 byte alignment     */
 #pragma pack(pop)
 
 #endif

@@ -53,7 +53,9 @@ static inline int is_allowed_before_handshake(uint8_t packet_type) {
 static inline int is_valid_transition(ATCState from, ATCState to) {
     switch (from) {
         case STATE_IDLE:          return (to == STATE_HANDSHAKE);
-        case STATE_HANDSHAKE:     return (to == STATE_TAKEOFF);
+        case STATE_HANDSHAKE:     return (to == STATE_TAKEOFF)
+                                     || (to == STATE_TRANSIT)
+                                     || (to == STATE_LANDING);
         case STATE_TAKEOFF:       return (to == STATE_TRANSIT)      || (to == STATE_MAYDAY);
         case STATE_TRANSIT:       return (to == STATE_LANDING)      || (to == STATE_MAYDAY);
         case STATE_LANDING:       return (to == STATE_DISCONNECTED) || (to == STATE_MAYDAY);
