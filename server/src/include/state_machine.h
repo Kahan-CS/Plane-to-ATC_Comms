@@ -33,6 +33,19 @@ static inline const char *state_to_str(ATCState s) {
     }
 }
 
+/* REQ-SYS-080: Pre-handshake command gate.
+ * Returns 1 if packet type is allowed while state is IDLE/HANDSHAKE. */
+static inline int is_allowed_before_handshake(uint8_t packet_type) {
+    switch (packet_type) {
+        case PKT_HANDSHAKE:
+        case PKT_DISCONNECT:
+        case PKT_ACK:
+            return 1;
+        default:
+            return 0;
+    }
+}
+
 /* REQ-STM-020: Only sequential transitions permitted.
  * IDLE → HANDSHAKE → TAKEOFF → TRANSIT → LANDING → DISCONNECTED → IDLE
  * REQ-STM-040: TAKEOFF/TRANSIT/LANDING may also transition to MAYDAY sub-state.

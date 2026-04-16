@@ -13,11 +13,32 @@
  *
  * Regulatory: CARs SOR/96-433 Part V · DO-178C DAL-D
  *
- * REQ-SVR-010/020/030/040/050/060/070
- * REQ-STM-010/020/030/040
- * REQ-LOG-010/020/060
- * REQ-COM-010/060
- * REQ-PKT-031/034
+ *  Requirements covered in this file:
+ *      REQ-SYS-010  Server is one of the two required applications
+ *      REQ-SYS-050  All TX/RX packets are logged to file
+ *      REQ-SYS-060  Server implements an operational state machine
+ *      REQ-SYS-070  Server supports large data transfer command
+ *      REQ-SYS-080  Handshake required before accepting any commands
+ *      REQ-SVR-010  Listens on configurable port, accepts verified conns
+ *      REQ-SVR-020  Parses structured packets and displays info
+ *      REQ-SVR-030  Detects and flags MAYDAY packets
+ *      REQ-SVR-040  Accepts buffered handoff packets via origin_atc_id
+ *      REQ-SVR-050  Transmits >= 1 MB telemetry object on request
+ *      REQ-SVR-060  Displays connected session log with phase
+ *      REQ-SVR-070  Sends phase-appropriate ATC clearances
+ *      REQ-STM-010  Defined states
+ *      REQ-STM-020  Only sequential transitions permitted
+ *      REQ-STM-030  Reject invalid commands with ERROR packet
+ *      REQ-STM-040  MAYDAY sub-state from active flight phases
+ *      REQ-LOG-010  Log created at startup, flushed per event
+ *      REQ-LOG-020  State transitions logged as distinct entries
+ *      REQ-LOG-050  MAYDAY packets prefixed with [MAYDAY] in log
+ *      REQ-LOG-060  Session summary at shutdown
+ *      REQ-COM-010  TCP/IP transport
+ *      REQ-COM-060  ACK transmission after receiving a data packet
+ *      REQ-PKT-020  Buffered handoff packets identified by origin_atc_id
+ *      REQ-PKT-031  54-byte packet header layout
+ *      REQ-PKT-034  aircraft_id and emergency_flag readable from header
  */
 
 /* Server keepalive interval. The Rust client's receiver thread has a
@@ -61,6 +82,7 @@ static inline int64_t swap_i64(int64_t v) {
 
 /* ================================================================
  *  Keepalive — empty PKT_ACK to prevent client receiver timeout
+    REQ-COM-030 (keep-alive mechanism) companion on the server side.
  * ================================================================ */
 
 static int send_server_keepalive(SOCKET sockfd, const char *aircraft_id) {
@@ -72,6 +94,8 @@ static int send_server_keepalive(SOCKET sockfd, const char *aircraft_id) {
 
 /* ================================================================
  *  Session registry  (REQ-SVR-060)
+    for the client reference, we just
+ *  show the current session phase on the ATC console.
  * ================================================================ */
 
 static int g_session_count = 0;
@@ -92,6 +116,8 @@ static void handle_client(SOCKET client_fd) {
     ATCState state = STATE_IDLE;
     ATCState prev  = STATE_IDLE;
     char     aircraft_id[32] = {0};
+
+    int handshake_verified = 0;   /* Set true after PKT_HANDSHAKE verified */
 
     /* Tracks the last time the server sent ANY packet to the client.
      * Used to decide when a keepalive is needed.
@@ -178,12 +204,31 @@ static void handle_client(SOCKET client_fd) {
             free(payload); continue;
         }
 
-        /* REQ-SVR-040 / REQ-PKT-020: Detect buffered handoff packets. */
+     /* REQ-SVR-040 / REQ-PKT-020: Detect buffered handoff packets. */
         if (hdr.origin_atc_id != 0 && hdr.origin_atc_id != SERVER_ATC_ID) {
             printf("[ATC] Buffered handoff packet from ATC #%u for %s\n",
                    hdr.origin_atc_id, hdr.aircraft_id);
             char m[128]; snprintf(m, sizeof(m), "Buffered handoff packet from ATC #%u", hdr.origin_atc_id);
             log_info(m);
+
+            /* Accept and ACK buffered packets without state machine enforcement.
+             * These are historical retransmissions, not new commands. */
+            send_ack(client_fd, hdr.seq_num, aircraft_id);
+            last_send_ms = now_ms();
+            free(payload); continue;
+        }
+
+        /* REQ-SYS-080: Reject any command received before handshake is verified. */
+        if (!handshake_verified &&
+            !is_allowed_before_handshake(hdr.packet_type)) {
+            char err[160];
+            snprintf(err, sizeof(err),
+                    "Packet %s rejected: handshake not yet completed (REQ-SYS-080)",
+                    type_str);
+            send_error_pkt(client_fd, err, aircraft_id);
+            last_send_ms = now_ms();
+            free(payload);
+            continue;
         }
 
         /* Log incoming packet (skip logging heartbeats to reduce noise). */
@@ -226,9 +271,15 @@ static void handle_client(SOCKET client_fd) {
                 break;
             }
 
-            printf("[ATC] Handshake VERIFIED. Waiting for takeoff.\n");
+           /* REQ-SYS-080: Handshake verified, but remain in STATE_HANDSHAKE
+            * until client explicitly sends PKT_TAKEOFF. This enforces an
+            * explicit "ready-to-depart" command from the pilot rather than
+            * auto-advancing on handshake success. */
+            
+            handshake_verified = 1;
+            printf("[ATC] Handshake VERIFIED. Awaiting TAKEOFF command from client.\n");
             display_session_status(aircraft_id, state);
-            send_ack(client_fd, hdr.seq_num, aircraft_id);
+            send_ack(client_fd, hdr.seq_num, aircraft_id);           //REQ-COM-060: ACK handshake packet to confirm receipt and verification
             //send_server_keepalive(client_fd, aircraft_id);
             last_send_ms = now_ms();
             break;
@@ -236,16 +287,21 @@ static void handle_client(SOCKET client_fd) {
 
         /* ---- TAKEOFF ---- */
         case PKT_TAKEOFF: {
+            /* REQ-STM-020: TAKEOFF is valid only after handshake verification.
+            * First TAKEOFF packet triggers HANDSHAKE -> TAKEOFF transition. */
             if (state != STATE_HANDSHAKE && state != STATE_TAKEOFF) {
-                send_error_pkt(client_fd, "TAKEOFF not valid in current state", aircraft_id);
+                send_error_pkt(client_fd,
+                            "TAKEOFF not valid in current state",
+                            aircraft_id);
                 last_send_ms = now_ms();
                 break;
             }
 
             if (state == STATE_HANDSHAKE) {
                 prev = state; state = STATE_TAKEOFF;
-                log_state_transition(prev, state, "Takeoff packet received");
-                printf("[ATC] State: %s -> %s\n", state_to_str(prev), state_to_str(state));
+                log_state_transition(prev, state, "Takeoff command received");
+                printf("[ATC] State: %s -> %s\n",
+                    state_to_str(prev), state_to_str(state));
                 display_session_status(aircraft_id, state);
             }
 

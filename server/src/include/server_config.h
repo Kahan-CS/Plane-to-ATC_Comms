@@ -1,6 +1,11 @@
 /**
  * @file  server_config.h
  * @brief Server-wide constants and configuration.
+ * 
+ * Requirements covered:
+ *   REQ-SVR-010   Server identity used during listen/accept
+ *   REQ-PKT-020   SERVER_ATC_ID is the value a live packet carries
+ *                 (or zero, from the client's perspective)
  */
 
 #ifndef SERVER_CONFIG_H
