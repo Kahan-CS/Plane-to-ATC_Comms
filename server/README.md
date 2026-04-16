@@ -166,3 +166,26 @@ ATC_SERVER | 2026-04-06 14:10:10.200 | FROM | TAKEOFF | SEQ=2 | LEN=41 | ...
 Packets RX: 5  TX: 6  Errors: 0  Transitions: 8
 === Session End ===
 ```
+
+## Building
+
+**Prerequisites:**
+- CMake 3.10+
+- GCC (MinGW-w64) or MSVC on Windows
+- Windows Sockets (`ws2_32`)
+
+### Using CMake
+
+```bash
+cd server
+mkdir build
+cd build
+cmake ..
+cmake --build .
+```
+
+The executable lands in `build/debug/server.exe`. Run it with:
+
+```bash
+.\Debug\server.exe 5555
+```
