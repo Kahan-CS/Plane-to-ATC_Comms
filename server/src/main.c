@@ -42,7 +42,7 @@
  */
 
 /* Server keepalive interval. The Rust client's receiver thread has a
- * 10-second read timeout. We must send *something* to the client more
+ * 8-second read timeout. We must send *something* to the client more
  * often than that to prevent the receiver from declaring connection lost. */
 #define SERVER_KEEPALIVE_INTERVAL_MS 8000LL
 
@@ -55,6 +55,16 @@
 #include "include/server_config.h"
 #include "include/state_machine.h"
 #include "include/network.h"
+
+/* ANSI escape codes for terminal coloring. */
+#define ANSI_RESET       "\x1b[0m"
+#define ANSI_BOLD        "\x1b[1m"
+#define ANSI_BLINK       "\x1b[5m"
+#define ANSI_RED         "\x1b[31m"
+#define ANSI_WHITE       "\x1b[97m"
+#define ANSI_BG_RED      "\x1b[41m"
+#define ANSI_BG_YELLOW   "\x1b[43m"
+
 
 /* Runtime ATC identity - set from command line.
  * Usage: atc-server <PORT> [ATC_NAME] [ATC_ID] */
@@ -203,7 +213,13 @@ static void handle_client(SOCKET client_fd) {
 
         /* REQ-SVR-030 / REQ-STM-040: Emergency flag check before dispatch. */
         if (hdr.emergency_flag == 1) {
-            printf("\n!!! [MAYDAY] EMERGENCY from %s !!!\n\n", hdr.aircraft_id);
+           printf("\n" ANSI_BG_RED ANSI_WHITE ANSI_BOLD
+       "  ============================================  " ANSI_RESET "\n"
+       ANSI_BG_RED ANSI_WHITE ANSI_BOLD
+       "   !!!  MAYDAY  -  EMERGENCY FROM %-12s  !!!   " ANSI_RESET "\n"
+       ANSI_BG_RED ANSI_WHITE ANSI_BOLD
+       "  ============================================  " ANSI_RESET "\n\n",
+       hdr.aircraft_id);
             char s[128]; snprintf(s, sizeof(s), "MAYDAY from %s", hdr.aircraft_id);
             log_packet("FROM", type_str, hdr.seq_num, hdr.payload_length, hdr.emergency_flag, s);
 
@@ -632,6 +648,15 @@ int main(int argc, char *argv[]) {
         fprintf(stderr, "WSAStartup failed\n"); return 1;
     }
     if (logger_init() != 0) { WSACleanup(); return 1; }
+
+
+    /* Enable ANSI escape codes (colors, cursor control) on Windows 10+. */
+    HANDLE hOut = GetStdHandle(STD_OUTPUT_HANDLE);
+    DWORD dwMode = 0;
+    if (hOut != INVALID_HANDLE_VALUE && GetConsoleMode(hOut, &dwMode)) {
+        SetConsoleMode(hOut, dwMode | ENABLE_VIRTUAL_TERMINAL_PROCESSING);
+    }
+
 
     printf("\n========================================\n");
     printf("   ATC GROUND CONTROL SERVER\n");
