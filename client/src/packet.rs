@@ -84,7 +84,9 @@ pub struct Packet {
 
 //  Payload structs (serialized into payload bytes)
 
-/// REQ-PKT-061: Handshake payload (52 bytes)
+/// REQ-PKT-061: Handshake payload (53 bytes)
+/// initial_phase tells the server which state to enter after verification.
+/// 0 = TAKEOFF (default), 2 = TRANSIT, 3 = LANDING.
 #[repr(C, packed)]
 #[derive(Debug, Clone, Copy, Default)]
 pub struct HandshakePayload {
@@ -93,16 +95,22 @@ pub struct HandshakePayload {
     pub aircraft_model: [u8; 16],
     pub origin: [u8; 4],
     pub destination: [u8; 4],
+    pub initial_phase: u8,
 }
+
+pub const PHASE_TAKEOFF: u8 = 0;
+pub const PHASE_TRANSIT: u8 = 2;
+pub const PHASE_LANDING: u8 = 3;
 
 impl HandshakePayload {
     pub fn to_bytes(&self) -> Vec<u8> {
-        let mut v = Vec::with_capacity(52);
+        let mut v = Vec::with_capacity(53);
         v.extend_from_slice(&self.callsign);
         v.extend_from_slice(&self.aircraft_type);
         v.extend_from_slice(&self.aircraft_model);
         v.extend_from_slice(&self.origin);
         v.extend_from_slice(&self.destination);
+        v.push(self.initial_phase);
         v
     }
 

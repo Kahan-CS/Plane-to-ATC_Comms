@@ -29,7 +29,7 @@ mod receiver;
 
 use std::io::{self, BufRead, Write};
 use std::process;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::Arc;
 
 use buffer::{flush_buffer, HandoffBuffer};
@@ -38,7 +38,8 @@ use logger::Logger;
 use network::Connection;
 use packet::{
     HandshakePayload, Packet, PacketHeader, PKT_ACK, PKT_DISCONNECT, PKT_ERROR, PKT_HANDSHAKE,
-    PKT_HANDOFF_NOTIFY, PKT_LARGE_DATA_REQUEST, PKT_MAYDAY,
+    PKT_HANDOFF_NOTIFY, PKT_LARGE_DATA_REQUEST, PKT_MAYDAY, PHASE_LANDING, PHASE_TAKEOFF,
+    PHASE_TRANSIT,
 };
 use phases::{build_landing_packet, build_takeoff_packet, build_transit_packet};
 use receiver::spawn_receiver;
@@ -94,6 +95,7 @@ fn main() {
         &dest,
         &logger,
         &mut handoff_buffer,
+        PHASE_TAKEOFF,
     );
 
     // REQ-LOG-060: session summary written on clean exit
@@ -110,6 +112,7 @@ fn run_session(
     dest: &str,
     logger: &Arc<Logger>,
     handoff_buffer: &mut HandoffBuffer,
+    initial_phase: u8,
 ) {
     println!("Connecting to ATC server at {}...", server_addr);
 
@@ -132,6 +135,7 @@ fn run_session(
         aircraft_model: HandshakePayload::str_to_fixed(ac_model),
         origin: HandshakePayload::str_to_fixed(origin),
         destination: HandshakePayload::str_to_fixed(dest),
+        initial_phase,
     };
 
     // Capture length before move into Packet (avoids use-after-move)
@@ -208,6 +212,7 @@ fn run_session(
 
     let alive = Arc::new(AtomicBool::new(true));
     let handoff_flag = Arc::new(AtomicBool::new(false));
+    let phase_state = Arc::new(AtomicU8::new(initial_phase));
 
     let recv_stream = conn.stream.try_clone().unwrap_or_else(|e| {
         logger.log_error(&format!("Failed to clone stream for receiver: {}", e));
@@ -220,6 +225,7 @@ fn run_session(
         Arc::clone(logger),
         Arc::clone(&alive),
         Arc::clone(&handoff_flag),
+        Arc::clone(&phase_state),
     );
 
     // active keepalive thread for early connection-loss detection.
@@ -233,7 +239,7 @@ fn run_session(
 
     // Interactive menu (REQ-SYS-040)
 
-    let did_handoff = run_menu(
+    let (should_reconnect, reconnect_phase) = run_menu(
         &mut conn,
         &mut seq,
         callsign,
@@ -241,12 +247,13 @@ fn run_session(
         &alive,
         &handoff_flag,
         handoff_buffer,
+        &phase_state,
     );
 
-    if did_handoff {
+    if should_reconnect {
         println!();
         println!(
-            "[Handoff] Enter next ATC server (ip:port), or press Enter to reuse {}",
+            "[Reconnect] Enter next ATC server (ip:port), or press Enter to reuse {}",
             server_addr
         );
         print!("New server: ");
@@ -260,7 +267,7 @@ fn run_session(
             next.trim().to_string()
         };
 
-        logger.log_connection(&format!("Handoff reconnect to {}", next_server));
+        logger.log_connection(&format!("Reconnect to {}", next_server));
         run_session(
             &next_server,
             callsign,
@@ -270,6 +277,7 @@ fn run_session(
             dest,
             logger,
             handoff_buffer,
+            reconnect_phase,
         );
     }
 }
@@ -285,20 +293,21 @@ fn run_menu(
     alive: &Arc<AtomicBool>,
     handoff_flag: &Arc<AtomicBool>,
     handoff_buffer: &mut HandoffBuffer,
-) -> bool {
+    phase_state: &Arc<AtomicU8>,
+) -> (bool, u8) {
     let stdin = io::stdin();
     loop {
         if !alive.load(Ordering::SeqCst) {
-            println!("\n[NET] Connection lost. Exiting interactive menu.");
-            logger.log_connection("Connection lost detected by receiver thread");
-            break false;
+            println!("\n[NET] Connection lost. Switching to reconnect prompt.");
+            logger.log_connection("Connection lost detected by receiver thread; requesting reconnect");
+            break (true, phase_state.load(Ordering::SeqCst));
         }
 
         if handoff_flag.load(Ordering::SeqCst) {
             println!("\n[ATC] Handoff notice active. Reconnecting to next ATC...");
             logger.log_connection("Handoff notify flag raised by receiver thread");
             handoff_flag.store(false, Ordering::SeqCst);
-            return true;
+            return (true, phase_state.load(Ordering::SeqCst));
         }
 
         println!();
@@ -317,7 +326,7 @@ fn run_menu(
         let mut input = String::new();
         if stdin.lock().read_line(&mut input).is_err() {
             logger.log_error("Failed to read user input — exiting menu");
-            break false;
+            break (false, phase_state.load(Ordering::SeqCst));
         }
 
         match input.trim() {
@@ -326,10 +335,12 @@ fn run_menu(
                 send_or_buffer(conn, pkt, seq, "TAKEOFF", logger, handoff_buffer, alive);
             }
             "2" => {
+                phase_state.store(PHASE_TRANSIT, Ordering::SeqCst);
                 let pkt = build_transit_packet(*seq, callsign, current_timestamp());
                 send_or_buffer(conn, pkt, seq, "TRANSIT", logger, handoff_buffer, alive);
             }
             "3" => {
+                phase_state.store(PHASE_LANDING, Ordering::SeqCst);
                 let pkt = build_landing_packet(*seq, callsign, current_timestamp());
                 send_or_buffer(conn, pkt, seq, "LANDING", logger, handoff_buffer, alive);
             }
@@ -354,7 +365,7 @@ fn run_menu(
             "5" => {
                 send_disconnect(conn, seq, callsign, logger.as_ref());
                 println!("Disconnected. Goodbye.");
-                break false;
+                break (false, phase_state.load(Ordering::SeqCst));
             }
             "6" => {
                 // REQ-SYS-070: request >= 1 MB weather/telemetry data from server
@@ -399,7 +410,7 @@ fn run_menu(
                 conn.send_packet(&pkt).ok();
                 logger.log_tx("HANDOFF_NOTIFY", *seq, 0, "pilot-initiated handoff");
                 *seq += 1;
-                return true;
+                return (true, phase_state.load(Ordering::SeqCst));
             }
             other => {
                 let msg = format!("Invalid menu input: '{}'", other.trim());
