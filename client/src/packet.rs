@@ -364,13 +364,13 @@ mod tests {
     // REQ-PKT-060, REQ-PKT-061
     // DO-178C DAL-D: payload structs must match C server
     //   exactly for binary compatibility
-    // Verifies HandshakePayload is exactly 52 bytes
-    // size_of::<HandshakePayload>() equals 52
+    // Verifies HandshakePayload is exactly 53 bytes
+    // size_of::<HandshakePayload>() equals 53
     #[test]
-    fn test_clt007_handshake_payload_52_bytes() {
+    fn test_clt007_handshake_payload_53_bytes() {
         let size = std::mem::size_of::<HandshakePayload>();
-        assert_eq!(size, 52,
-            "HandshakePayload must be 52 bytes to match C server");
+        assert_eq!(size, 53,
+            "HandshakePayload must be 53 bytes to match C server");
     }
 
     // CLT-008
@@ -471,18 +471,22 @@ mod tests {
     // REQ-PKT-061, REQ-CLT-030
     // DO-178C DAL-D: aircraft identification data must\ be correctly serialized into handshake payload with no field corruption or offset error
     // Verifies HandshakePayload::to_bytes() produces
-    //   52 bytes and callsign appears at offset 0
-    // bytes.len() == 52 and first 6 bytes match callsign
+    //   53 bytes, callsign appears at offset 0,
+    //   and initial_phase is serialized as the final byte
+    // bytes.len() == 53 and first 6 bytes match callsign
     #[test]
     fn test_clt021_handshake_payload_serializes_callsign() {
         let mut p = HandshakePayload::default();
         let callsign = b"AC1234";
         p.callsign[..callsign.len()].copy_from_slice(callsign);
+        p.initial_phase = PHASE_TRANSIT;
         let bytes = p.to_bytes();
-        assert_eq!(bytes.len(), 52,
-            "HandshakePayload::to_bytes must produce 52 bytes");
+        assert_eq!(bytes.len(), 53,
+            "HandshakePayload::to_bytes must produce 53 bytes");
         assert_eq!(&bytes[0..6], callsign,
             "callsign bytes must appear at offset 0 in payload");
+        assert_eq!(bytes[52], PHASE_TRANSIT,
+            "initial_phase must be serialized as the last byte");
     }
 
     // CLT-022
