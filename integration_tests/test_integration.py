@@ -336,7 +336,7 @@ def test_INT010_handoff_buffered_packets(atc_client):
         new_client.send_packet(
             PKT_TRANSIT, seq_num=5,
             aircraft_id="AC8821",
-            atc_id=1,               # non-zero = buffered packet from ATC #1
+            atc_id=2,               # non-zero != SERVER_ATC_ID(1) = buffered from ATC #2
             emergency_flag=0,
             payload=bytes(14),
         )

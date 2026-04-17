@@ -13,14 +13,27 @@ build:
 	$(CC) $(CFLAGS) $(INCLUDES) $(SRC) -o $(BIN) -lws2_32
 
 test:
-ifeq ($(TEST_SRCS),)
-	@echo "No test files yet."
-else
-	@for t in $(TEST_SRCS); do \
-		bin=$$(basename $$t .c); \
-		$(CC) $(CFLAGS) $(INCLUDES) $$t -o $$bin && ./$$bin; \
-	done
-endif
+	$(CC) -Wall -Wextra -std=c11 \
+		-I./include \
+		-I./src/include \
+		-I../shared \
+		tests/test_state_machine.c \
+		-o tests/test_state_machine_runner.exe
+	./tests/test_state_machine_runner.exe
+	$(CC) -Wall -Wextra -std=c11 \
+		-I./include \
+		-I./src/include \
+		-I../shared \
+		tests/test_logger.c \
+		-o tests/test_logger_runner.exe
+	./tests/test_logger_runner.exe
+	$(CC) -Wall -Wextra -std=c11 \
+		-I./include \
+		-I./src/include \
+		-I../shared \
+		tests/test_packet.c \
+		-o tests/test_packet_runner.exe
+	./tests/test_packet_runner.exe
 
 coverage:
 	$(CC) -Wall -Wextra -std=c11 --coverage \
