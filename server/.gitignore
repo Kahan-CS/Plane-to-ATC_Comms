@@ -5,6 +5,8 @@
 *.log
 tests/*.exe
 tests/*.log
+tests/bin/
+tests/bin_cov/
 *.gcno
 *.gcda
 coverage_report/

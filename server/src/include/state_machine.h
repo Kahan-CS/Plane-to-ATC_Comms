@@ -8,7 +8,7 @@
 #ifndef STATE_MACHINE_H
 #define STATE_MACHINE_H
 
-#include "../../shared/packet.h"
+#include "../../../shared/packet.h"
 
 /* REQ-STM-010: Defined states.
  * REQ-STM-040: STATE_MAYDAY is a sub-state reachable from any active flight state. */

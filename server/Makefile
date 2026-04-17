@@ -1,81 +1,91 @@
-CC      = gcc
-CFLAGS  = -Wall -Wextra -std=c11
-INCLUDES = -Iinclude -I../shared
+CC = gcc
+CFLAGS = -Wall -Wextra -std=c11
+INCLUDES = -I./include -I./src/include -I../shared
 
-SRC     = src/main.c
-BIN     = atc-server
+SRC = src/main.c
+BIN = atc-server.exe
 
-TEST_SRCS = $(wildcard tests/*.c)
+UNIT_TEST_SRCS = \
+	tests/unittests/test_state_machine.c \
+	tests/unittests/test_logger.c \
+	tests/unittests/test_packet.c
 
-.PHONY: build test coverage coverage-clean clean
+UNIT_TEST_BINS = \
+	tests/bin/test_state_machine.exe \
+	tests/bin/test_logger.exe \
+	tests/bin/test_packet.exe
+
+COV_TEST_BINS = \
+	tests/bin_cov/test_state_machine_cov.exe \
+	tests/bin_cov/test_logger_cov.exe \
+	tests/bin_cov/test_packet_cov.exe
+
+.PHONY: build test unit integration regression coverage coverage-clean clean
 
 build:
 	$(CC) $(CFLAGS) $(INCLUDES) $(SRC) -o $(BIN) -lws2_32
 
-test:
-	$(CC) -Wall -Wextra -std=c11 \
-		-I./include \
-		-I./src/include \
-		-I../shared \
-		tests/test_state_machine.c \
-		-o tests/test_state_machine_runner.exe
-	./tests/test_state_machine_runner.exe
-	$(CC) -Wall -Wextra -std=c11 \
-		-I./include \
-		-I./src/include \
-		-I../shared \
-		tests/test_logger.c \
-		-o tests/test_logger_runner.exe
-	./tests/test_logger_runner.exe
-	$(CC) -Wall -Wextra -std=c11 \
-		-I./include \
-		-I./src/include \
-		-I../shared \
-		tests/test_packet.c \
-		-o tests/test_packet_runner.exe
-	./tests/test_packet_runner.exe
+tests/bin/test_state_machine.exe: tests/unittests/test_state_machine.c
+	@if not exist tests\\bin mkdir tests\\bin
+	$(CC) $(CFLAGS) $(INCLUDES) $< -o $@
 
-coverage:
-	$(CC) -Wall -Wextra -std=c11 --coverage \
-		-I./include \
-		-I./src/include \
-		-I../shared \
-		tests/test_state_machine.c \
-		-o tests/test_state_machine_cov.exe
-	$(CC) -Wall -Wextra -std=c11 --coverage \
-		-I./include \
-		-I./src/include \
-		-I../shared \
-		tests/test_logger.c \
-		-o tests/test_logger_cov.exe
-	$(CC) -Wall -Wextra -std=c11 --coverage \
-		-I./include \
-		-I./src/include \
-		-I../shared \
-		tests/test_packet.c \
-		-o tests/test_packet_cov.exe
-	./tests/test_state_machine_cov.exe
-	./tests/test_logger_cov.exe
-	./tests/test_packet_cov.exe
-	mkdir -p coverage_report
-	python -m gcovr \
-		--root . \
-		--filter src/include/ \
-		--filter ../shared/ \
-		--html-details coverage_report/index.html \
-		--txt coverage_report/summary.txt \
-		--print-summary
+tests/bin/test_logger.exe: tests/unittests/test_logger.c
+	@if not exist tests\\bin mkdir tests\\bin
+	$(CC) $(CFLAGS) $(INCLUDES) $< -o $@
+
+tests/bin/test_packet.exe: tests/unittests/test_packet.c
+	@if not exist tests\\bin mkdir tests\\bin
+	$(CC) $(CFLAGS) $(INCLUDES) $< -o $@
+
+unit: $(UNIT_TEST_BINS)
+	.\\tests\\bin\\test_state_machine.exe
+	.\\tests\\bin\\test_logger.exe
+	.\\tests\\bin\\test_packet.exe
+
+test: unit
+
+integration: build
+	powershell -ExecutionPolicy Bypass -File tests/integration/test_accept_loop.ps1 -ServerExe ./$(BIN)
+
+regression: unit integration
+
+tests/bin_cov/test_state_machine_cov.exe: tests/unittests/test_state_machine.c
+	@if not exist tests\\bin_cov mkdir tests\\bin_cov
+	$(CC) $(CFLAGS) --coverage $(INCLUDES) $< -o $@
+
+tests/bin_cov/test_logger_cov.exe: tests/unittests/test_logger.c
+	@if not exist tests\\bin_cov mkdir tests\\bin_cov
+	$(CC) $(CFLAGS) --coverage $(INCLUDES) $< -o $@
+
+tests/bin_cov/test_packet_cov.exe: tests/unittests/test_packet.c
+	@if not exist tests\\bin_cov mkdir tests\\bin_cov
+	$(CC) $(CFLAGS) --coverage $(INCLUDES) $< -o $@
 
 coverage-clean:
-	rm -f tests/*_cov.exe
-	rm -f tests/*.gcno tests/*.gcda
-	rm -f *.gcno *.gcda
-	rm -rf coverage_report/
+	@if exist tests\\bin\\*.exe del /q tests\\bin\\*.exe
+	@if exist tests\\bin_cov\\*.exe del /q tests\\bin_cov\\*.exe
+	@if exist tests\\bin_cov\\*.gcno del /q tests\\bin_cov\\*.gcno
+	@if exist tests\\bin_cov\\*.gcda del /q tests\\bin_cov\\*.gcda
+	@if exist tests\\unittests\\*.gcno del /q tests\\unittests\\*.gcno
+	@if exist tests\\unittests\\*.gcda del /q tests\\unittests\\*.gcda
+	@if exist *.gcno del /q *.gcno
+	@if exist *.gcda del /q *.gcda
+	@if exist coverage_report rmdir /s /q coverage_report
 
-integration:
-	@echo "Starting server in background..."
-	@echo "Run: python -m pytest integration_tests/ -v"
-	@echo "Make sure atc-server.exe is running on port 9000"
+coverage: coverage-clean $(COV_TEST_BINS)
+	.\\tests\\bin_cov\\test_state_machine_cov.exe
+	.\\tests\\bin_cov\\test_logger_cov.exe
+	.\\tests\\bin_cov\\test_packet_cov.exe
+	@if not exist coverage_report mkdir coverage_report
+	python -m gcovr \
+		--root . \
+		--filter src/include \
+		--filter ../shared \
+		--exclude tests \
+		--print-summary \
+		--txt coverage_report/summary.txt \
+		--html-details coverage_report/index.html
 
-clean:
-	rm -f $(BIN) *.o tests/*.o
+clean: coverage-clean
+	@if exist $(BIN) del /q $(BIN)
+	@if exist *.o del /q *.o
