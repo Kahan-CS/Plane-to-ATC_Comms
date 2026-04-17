@@ -133,5 +133,5 @@ Winsock and would compile on Linux without changes.
 A GitHub Actions workflow running on Ubuntu could
 provide automated coverage on every push with
 more accurate branch tracking. This is a future
-enhancement — current coverage numbers are
+enhancement: current coverage numbers are
 sufficient for DO-178C DAL-D compliance evidence.
