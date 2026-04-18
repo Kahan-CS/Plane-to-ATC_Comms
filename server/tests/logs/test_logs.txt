@@ -1,0 +1,79 @@
+PS C:\...\Users\kahan\CS-Conesto...\sem7\sw_sr\project\Plane-to-A...\server [testing-environment ≡]powershell -ExecutionPolicy Bypass -File tests/run_regression.ps1
+[1/4] Build server
+gcc -Wall -Wextra -std=c11 -I./include -I./src/include -I../shared src/main.c -o atc-server.exe -lws2_32
+In file included from src/main.c:57:
+src/include/network.h:23: warning: ignoring '#pragma comment ' [-Wunknown-pragmas]
+   23 | #pragma comment(lib, "ws2_32.lib")
+[2/4] Run unit tests
+gcc -Wall -Wextra -std=c11 -I./include -I./src/include -I../shared tests/unittests/test_state_machine.c -o tests/bin/test_state_machine.exe
+gcc -Wall -Wextra -std=c11 -I./include -I./src/include -I../shared tests/unittests/test_logger.c -o tests/bin/test_logger.exe
+gcc -Wall -Wextra -std=c11 -I./include -I./src/include -I../shared tests/unittests/test_packet.c -o tests/bin/test_packet.exe
+.\\tests\\bin\\test_state_machine.exe
+
+=== server/unittests/state_machine ===
+
+  test_idle_to_handshake_valid                  PASS
+  test_handshake_to_takeoff_valid               PASS
+  test_handshake_to_transit_valid_for_reconnect PASS
+  test_handshake_to_landing_valid_for_reconnect PASS
+  test_takeoff_to_transit_valid                 PASS
+  test_transit_to_landing_valid                 PASS
+  test_landing_to_disconnected_valid            PASS
+  test_disconnected_to_idle_valid               PASS
+  test_mayday_reachable_from_active_phases      PASS
+  test_skip_state_rejected                      PASS
+  test_backwards_transition_rejected            PASS
+  test_state_to_str_all_states                  PASS
+
+--- 12 run  12 passed  0 failed
+
+.\\tests\\bin\\test_logger.exe
+
+=== server/unittests/logger ===
+
+  test_logger_creates_file                      [LOG] Log file created: ATC_SERVER_20260417_215245.log
+[ATC] Session summary — RX: 0  TX: 0  Errors: 0  Transitions: 0
+PASS
+  test_log_info_does_not_crash                  [LOG] Log file created: ATC_SERVER_20260417_215245.log
+[ATC] Session summary — RX: 0  TX: 0  Errors: 0  Transitions: 0
+PASS
+  test_log_error_increments_counter             [LOG] Log file created: ATC_SERVER_20260417_215245.log
+[ATC] Session summary — RX: 0  TX: 0  Errors: 1  Transitions: 0
+PASS
+  test_log_state_transition_increments_counter  [LOG] Log file created: ATC_SERVER_20260417_215245.log
+[ATC] Session summary — RX: 0  TX: 0  Errors: 0  Transitions: 1
+PASS
+  test_log_packet_tx_increments_counter         [LOG] Log file created: ATC_SERVER_20260417_215245.log
+[ATC] Session summary — RX: 0  TX: 1  Errors: 0  Transitions: 0
+PASS
+  test_mayday_prefix_path_increments_rx         [LOG] Log file created: ATC_SERVER_20260417_215245.log
+[ATC] Session summary — RX: 1  TX: 0  Errors: 0  Transitions: 0
+PASS
+  test_logger_close_sets_file_null              [LOG] Log file created: ATC_SERVER_20260417_215245.log
+[ATC] Session summary — RX: 0  TX: 0  Errors: 0  Transitions: 0
+PASS
+
+--- 7 run  7 passed  0 failed
+
+.\\tests\\bin\\test_packet.exe
+
+=== server/unittests/packet ===
+
+  test_header_size_54_bytes                     PASS
+  test_handshake_payload_size_53_bytes          PASS
+  test_handshake_initial_phase_is_last_byte     PASS
+  test_all_packet_constants                     PASS
+  test_header_field_offsets                     PASS
+  test_emergency_flag_readable                  PASS
+  test_origin_atc_id_identifies_buffered_packet PASS
+
+--- 7 run  7 passed  0 failed
+
+[3/4] Run integration tests
+gcc -Wall -Wextra -std=c11 -I./include -I./src/include -I../shared src/main.c -o atc-server.exe -lws2_32
+In file included from src/main.c:57:
+src/include/network.h:23: warning: ignoring '#pragma comment ' [-Wunknown-pragmas]
+   23 | #pragma comment(lib, "ws2_32.lib")
+powershell -ExecutionPolicy Bypass -File tests/integration/test_accept_loop.ps1 -ServerExe ./atc-server.exe
+[PASS] Integration accept-loop smoke test
+[4/4] Regression run complete
